@@ -129,7 +129,7 @@ async function assertCorruptDatabaseFailsClosed(tsxBin: string) {
     });
     assert.notEqual(exitCode, 0, 'Server must refuse to start with a corrupt database file.');
     assert.equal(fs.readFileSync(dbFile, 'utf-8'), corruptContents, 'Corrupt database must remain untouched.');
-    assert.match(stderr, /refusing to replace it with seed data/i);
+    assert.match(stderr, /no seed fallback will be used/i);
   } finally {
     if (proc.pid && proc.exitCode === null) proc.kill('SIGKILL');
     fs.rmSync(corruptDataDir, { recursive: true, force: true });
