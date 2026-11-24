@@ -1,0 +1,6 @@
+{
+  "name": "Enterprise Control Center (ECC)",
+  "description": "IT asset inventory, employee and department directory, software and license register, maintenance requests, and audit history.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

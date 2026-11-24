@@ -1,0 +1,603 @@
+{
+  "organizations": [
+    {
+      "id": 1,
+      "name": "Default Organization",
+      "created_at": "2026-11-24T06:21:34.664Z"
+    }
+  ],
+  "users": [
+    {
+      "id": 1,
+      "organization_id": 1,
+      "email": "admin@example.com",
+      "full_name": "ECC Administrator",
+      "password_hash": "scrypt:a979be22ff703462778cae799886b124:63f7b37c5274bc6d528737e2e79c1500e20fde2c5937eb1b5aba5408eb4be8479bff4dc7c21e9f86e1b5b51e0dd1415b525c4587ca58b6537f0e935ca525c8b1",
+      "role": "admin",
+      "is_active": true,
+      "token_version": 1,
+      "version": 1,
+      "created_at": "2026-11-24T06:21:34.664Z"
+    },
+    {
+      "id": 2,
+      "organization_id": 1,
+      "email": "editor@example.com",
+      "full_name": "Инженер технической поддержки",
+      "password_hash": "scrypt:0401a1cdb0a085487d78a714fe2fd410:90af41cdf7cd04b5c1f5ba6617159ac312e573723bc111f5cc2f257cacff95ae48229f07950ca43ca584b129bf1741d49d1ffb30dcba3ba1c2f86df21ab08a01",
+      "role": "editor",
+      "is_active": true,
+      "token_version": 1,
+      "version": 1,
+      "created_at": "2026-11-24T06:21:34.664Z"
+    },
+    {
+      "id": 3,
+      "organization_id": 1,
+      "email": "viewer@example.com",
+      "full_name": "Сотрудник аудита (наблюдатель)",
+      "password_hash": "scrypt:031d51917220cd572191b1162d3d2ac0:5158945005ee89f540717b229e35dfe66eec3ee6413607b6432d42f978300d2fd6978cf14c2d9986e8a10756093e0d2b2e5692a1caaa081292161026d276fc0b",
+      "role": "viewer",
+      "is_active": true,
+      "token_version": 1,
+      "version": 1,
+      "created_at": "2026-11-24T06:21:34.664Z"
+    }
+  ],
+  "departments": [
+    {
+      "id": 1,
+      "organization_id": 1,
+      "version": 1,
+      "name": "Информационные технологии",
+      "code": "IT",
+      "created_at": "2026-11-24T06:21:34.664Z"
+    },
+    {
+      "id": 2,
+      "organization_id": 1,
+      "version": 1,
+      "name": "Отдел разработки ПО",
+      "code": "DEV",
+      "created_at": "2026-11-24T06:21:34.664Z"
+    },
+    {
+      "id": 3,
+      "organization_id": 1,
+      "version": 1,
+      "name": "Информационная безопасность",
+      "code": "SEC",
+      "created_at": "2026-11-24T06:21:34.664Z"
+    },
+    {
+      "id": 4,
+      "organization_id": 1,
+      "version": 1,
+      "name": "Бухгалтерия и финансы",
+      "code": "FIN",
+      "created_at": "2026-11-24T06:21:34.664Z"
+    },
+    {
+      "id": 5,
+      "organization_id": 1,
+      "version": 1,
+      "name": "Отдел управления персоналом",
+      "code": "HR",
+      "created_at": "2026-11-24T06:21:34.664Z"
+    }
+  ],
+  "employees": [
+    {
+      "id": 1,
+      "organization_id": 1,
+      "version": 1,
+      "employee_number": "EMP-001",
+      "full_name": "Иванов Алексей Сергеевич",
+      "department_id": 1,
+      "email": "alexey.ivanov@example.com",
+      "job_title": "Руководитель IT департамента",
+      "phone": "+7 (495) 100-20-01",
+      "is_active": true,
+      "created_at": "2026-11-24T06:21:34.664Z",
+      "updated_at": "2026-11-24T06:21:34.664Z"
+    },
+    {
+      "id": 2,
+      "organization_id": 1,
+      "version": 1,
+      "employee_number": "EMP-002",
+      "full_name": "Смирнова Елена Михайловна",
+      "department_id": 2,
+      "email": "elena.smirnova@example.com",
+      "job_title": "Ведущий DevOps инженер",
+      "phone": "+7 (495) 100-20-02",
+      "is_active": true,
+      "created_at": "2026-11-24T06:21:34.664Z",
+      "updated_at": "2026-11-24T06:21:34.664Z"
+    },
+    {
+      "id": 3,
+      "organization_id": 1,
+      "version": 1,
+      "employee_number": "EMP-003",
+      "full_name": "Ковалев Дмитрий Андреевич",
+      "department_id": 3,
+      "email": "dmitry.kovalev@example.com",
+      "job_title": "Специалист по кибербезопасности",
+      "phone": "+7 (495) 100-20-03",
+      "is_active": true,
+      "created_at": "2026-11-24T06:21:34.664Z",
+      "updated_at": "2026-11-24T06:21:34.664Z"
+    },
+    {
+      "id": 4,
+      "organization_id": 1,
+      "version": 1,
+      "employee_number": "EMP-004",
+      "full_name": "Соколова Анна Павловна",
+      "department_id": 2,
+      "email": "anna.sokolova@example.com",
+      "job_title": "Старший инженер-программист",
+      "phone": "+7 (495) 100-20-04",
+      "is_active": true,
+      "created_at": "2026-11-24T06:21:34.664Z",
+      "updated_at": "2026-11-24T06:21:34.664Z"
+    },
+    {
+      "id": 5,
+      "organization_id": 1,
+      "version": 1,
+      "employee_number": "EMP-005",
+      "full_name": "Морозов Игорь Владимирович",
+      "department_id": 4,
+      "email": "igor.morozov@example.com",
+      "job_title": "Главный финансовый контролер",
+      "phone": "+7 (495) 100-20-05",
+      "is_active": true,
+      "created_at": "2026-11-24T06:21:34.664Z",
+      "updated_at": "2026-11-24T06:21:34.664Z"
+    }
+  ],
+  "assets": [
+    {
+      "id": 1,
+      "organization_id": 1,
+      "name": "Рабочая станция Dell Precision 5820",
+      "asset_tag": "AST-00101",
+      "category": "Компьютер",
+      "manufacturer": "Dell Inc.",
+      "model": "Precision 5820 Tower",
+      "serial_number": "SN-DELL-5820-9921",
+      "assigned_to": "Смирнова Елена Михайловна",
+      "status": "active",
+      "created_at": "2026-11-24T06:21:34.664Z",
+      "updated_at": "2026-11-24T06:21:34.664Z",
+      "version": 1
+    },
+    {
+      "id": 2,
+      "organization_id": 1,
+      "name": "Ноутбук Apple MacBook Pro 16\" M3 Max",
+      "asset_tag": "AST-00102",
+      "category": "Ноутбук",
+      "manufacturer": "Apple",
+      "model": "MacBook Pro 16 (A2991)",
+      "serial_number": "C02LX8819QJ",
+      "assigned_to": "Соколова Анна Павловна",
+      "status": "active",
+      "created_at": "2026-11-24T06:21:34.664Z",
+      "updated_at": "2026-11-24T06:21:34.664Z",
+      "version": 1
+    },
+    {
+      "id": 3,
+      "organization_id": 1,
+      "name": "Сервер баз данных HPE ProLiant DL380 Gen10",
+      "asset_tag": "AST-00103",
+      "category": "Сервер",
+      "manufacturer": "HPE",
+      "model": "ProLiant DL380 Gen10 2U",
+      "serial_number": "CZ20489A12",
+      "assigned_to": "Иванов Алексей Сергеевич",
+      "status": "active",
+      "created_at": "2026-11-24T06:21:34.664Z",
+      "updated_at": "2026-11-24T06:21:34.664Z",
+      "version": 1
+    },
+    {
+      "id": 4,
+      "organization_id": 1,
+      "name": "Маршрутизатор Cisco Catalyst 9300",
+      "asset_tag": "AST-00104",
+      "category": "Сетевое оборудование",
+      "manufacturer": "Cisco Systems",
+      "model": "C9300-48P",
+      "serial_number": "FCW2318L0AZ",
+      "assigned_to": null,
+      "status": "active",
+      "created_at": "2026-11-24T06:21:34.664Z",
+      "updated_at": "2026-11-24T06:21:34.664Z",
+      "version": 1
+    },
+    {
+      "id": 5,
+      "organization_id": 1,
+      "name": "Монитор 27\" Dell UltraSharp U2723QE",
+      "asset_tag": "AST-00105",
+      "category": "Монитор",
+      "manufacturer": "Dell Inc.",
+      "model": "UltraSharp U2723QE 4K",
+      "serial_number": "CN-0K7T9R-74261",
+      "assigned_to": "Ковалев Дмитрий Андреевич",
+      "status": "in_repair",
+      "created_at": "2026-11-24T06:21:34.664Z",
+      "updated_at": "2026-11-24T06:21:34.664Z",
+      "version": 1
+    }
+  ],
+  "maintenanceRequests": [
+    {
+      "id": 1,
+      "organization_id": 1,
+      "asset_id": 5,
+      "requested_by_user_id": 1,
+      "assigned_to_user_id": 2,
+      "title": "Мерцание матрицы при подключении через Type-C",
+      "description": "При передаче видеосигнала 4K 60Hz экран кратковременно гаснет. Требуется диагностика блока питания или кабеля.",
+      "priority": "high",
+      "status": "in_progress",
+      "created_at": "2026-11-24T06:21:34.664Z",
+      "updated_at": "2026-11-24T06:41:05.443Z",
+      "resolved_at": null,
+      "version": 3
+    },
+    {
+      "id": 2,
+      "organization_id": 1,
+      "asset_id": 3,
+      "requested_by_user_id": 1,
+      "assigned_to_user_id": 1,
+      "title": "Плановая замена термопасты и продувка серверов",
+      "description": "Профилактическое обслуживание серверного шкафа в серверной #2.",
+      "priority": "normal",
+      "status": "open",
+      "created_at": "2026-11-24T06:21:34.664Z",
+      "updated_at": "2026-11-24T06:21:34.664Z",
+      "resolved_at": null,
+      "version": 1
+    }
+  ],
+  "softwareLicenses": [
+    {
+      "id": 1,
+      "organization_id": 1,
+      "name": "JetBrains All Products Pack",
+      "publisher": "JetBrains s.r.o.",
+      "version": "2026.1",
+      "license_type": "subscription",
+      "license_reference": "JB-CORP-992144",
+      "seats_total": 25,
+      "seats_used": 19,
+      "purchased_at": "2026-01-15",
+      "expires_at": "2027-01-15",
+      "status": "active",
+      "notes": "Корпоративная подписка на весь стек IDE для команды разработки.",
+      "created_at": "2026-11-24T06:21:34.664Z",
+      "updated_at": "2026-11-24T06:21:34.664Z",
+      "record_version": 1
+    },
+    {
+      "id": 2,
+      "organization_id": 1,
+      "name": "Microsoft 365 Enterprise E5",
+      "publisher": "Microsoft Corporation",
+      "version": "Cloud",
+      "license_type": "subscription",
+      "license_reference": "MS-365-E5-8812",
+      "seats_total": 100,
+      "seats_used": 78,
+      "purchased_at": "2026-01-01",
+      "expires_at": "2027-01-01",
+      "status": "active",
+      "notes": "Пакет офисных приложений, Exchange Online и расширенная безопасность.",
+      "created_at": "2026-11-24T06:21:34.664Z",
+      "updated_at": "2026-11-24T06:21:34.664Z",
+      "record_version": 1
+    },
+    {
+      "id": 3,
+      "organization_id": 1,
+      "name": "Figma Enterprise Design",
+      "publisher": "Figma Inc.",
+      "version": "Cloud",
+      "license_type": "subscription",
+      "license_reference": "FIG-ENT-33190",
+      "seats_total": 15,
+      "seats_used": 12,
+      "purchased_at": "2026-03-01",
+      "expires_at": "2027-03-01",
+      "status": "active",
+      "notes": "Лицензии для UI/UX дизайнеров и фронтенд инженеров.",
+      "created_at": "2026-11-24T06:21:34.664Z",
+      "updated_at": "2026-11-24T06:21:34.664Z",
+      "record_version": 1
+    }
+  ],
+  "auditEvents": [
+    {
+      "id": 21,
+      "organization_id": 1,
+      "actor_user_id": 3,
+      "action": "maintenance.deleted",
+      "entity_type": "maintenance_request",
+      "entity_id": "4",
+      "details": {
+        "title": "Viewer Test Ticket"
+      },
+      "created_at": "2026-11-24T06:44:44.030Z"
+    },
+    {
+      "id": 20,
+      "organization_id": 1,
+      "actor_user_id": 3,
+      "action": "maintenance.created",
+      "entity_type": "maintenance_request",
+      "entity_id": "4",
+      "details": {
+        "title": "Viewer Test Ticket",
+        "asset_id": 1
+      },
+      "created_at": "2026-11-24T06:44:44.020Z"
+    },
+    {
+      "id": 19,
+      "organization_id": 1,
+      "actor_user_id": 3,
+      "action": "auth.login",
+      "entity_type": "user",
+      "entity_id": "3",
+      "details": {
+        "email": "viewer@example.com"
+      },
+      "created_at": "2026-11-24T06:44:43.983Z"
+    },
+    {
+      "id": 18,
+      "organization_id": 1,
+      "actor_user_id": 2,
+      "action": "auth.login",
+      "entity_type": "user",
+      "entity_id": "2",
+      "details": {
+        "email": "editor@example.com"
+      },
+      "created_at": "2026-11-24T06:44:43.919Z"
+    },
+    {
+      "id": 17,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "auth.login",
+      "entity_type": "user",
+      "entity_id": "1",
+      "details": {
+        "email": "admin@example.com"
+      },
+      "created_at": "2026-11-24T06:44:43.828Z"
+    },
+    {
+      "id": 16,
+      "organization_id": 1,
+      "actor_user_id": 3,
+      "action": "auth.login",
+      "entity_type": "user",
+      "entity_id": "3",
+      "details": {
+        "email": "viewer@example.com"
+      },
+      "created_at": "2026-11-24T06:41:05.595Z"
+    },
+    {
+      "id": 15,
+      "organization_id": 1,
+      "actor_user_id": 2,
+      "action": "auth.login",
+      "entity_type": "user",
+      "entity_id": "2",
+      "details": {
+        "email": "editor@example.com"
+      },
+      "created_at": "2026-11-24T06:41:05.530Z"
+    },
+    {
+      "id": 14,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "maintenance.updated",
+      "entity_type": "maintenance_request",
+      "entity_id": "1",
+      "details": {
+        "changes": {
+          "assigned_to_user_id": {
+            "old": 1,
+            "new": 2
+          }
+        }
+      },
+      "created_at": "2026-11-24T06:41:05.443Z"
+    },
+    {
+      "id": 13,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "maintenance.updated",
+      "entity_type": "maintenance_request",
+      "entity_id": "1",
+      "details": {
+        "changes": {
+          "assigned_to_user_id": {
+            "old": 2,
+            "new": 1
+          }
+        }
+      },
+      "created_at": "2026-11-24T06:41:05.437Z"
+    },
+    {
+      "id": 12,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "auth.login",
+      "entity_type": "user",
+      "entity_id": "1",
+      "details": {
+        "email": "admin@example.com"
+      },
+      "created_at": "2026-11-24T06:41:05.381Z"
+    },
+    {
+      "id": 11,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "maintenance.deleted",
+      "entity_type": "maintenance_request",
+      "entity_id": "3",
+      "details": {
+        "title": "Тестовая заявка"
+      },
+      "created_at": "2026-11-24T06:29:24.967Z"
+    },
+    {
+      "id": 10,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "auth.login",
+      "entity_type": "user",
+      "entity_id": "1",
+      "details": {
+        "email": "admin@example.com"
+      },
+      "created_at": "2026-11-24T06:29:24.949Z"
+    },
+    {
+      "id": 9,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "maintenance.created",
+      "entity_type": "maintenance_request",
+      "entity_id": "3",
+      "details": {
+        "title": "Тестовая заявка",
+        "asset_id": 1
+      },
+      "created_at": "2026-11-24T06:29:20.624Z"
+    },
+    {
+      "id": 8,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "auth.login",
+      "entity_type": "user",
+      "entity_id": "1",
+      "details": {
+        "email": "admin@example.com"
+      },
+      "created_at": "2026-11-24T06:29:20.606Z"
+    },
+    {
+      "id": 7,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "system.backup",
+      "entity_type": "system",
+      "entity_id": "1",
+      "details": {
+        "timestamp": "2026-11-24T06:29:15.695Z"
+      },
+      "created_at": "2026-11-24T06:29:15.695Z"
+    },
+    {
+      "id": 6,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "auth.login",
+      "entity_type": "user",
+      "entity_id": "1",
+      "details": {
+        "email": "admin@example.com"
+      },
+      "created_at": "2026-11-24T06:29:15.650Z"
+    },
+    {
+      "id": 5,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "auth.login",
+      "entity_type": "user",
+      "entity_id": "1",
+      "details": {
+        "email": "admin@example.com"
+      },
+      "created_at": "2026-11-24T06:21:44.607Z"
+    },
+    {
+      "id": 4,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "auth.login",
+      "entity_type": "user",
+      "entity_id": "1",
+      "details": {
+        "email": "admin@example.com"
+      },
+      "created_at": "2026-11-24T06:21:40.451Z"
+    },
+    {
+      "id": 1,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "system.bootstrap",
+      "entity_type": "system",
+      "entity_id": "1",
+      "details": {
+        "message": "Инициализация платформы Enterprise Control Center"
+      },
+      "created_at": "2026-11-24T06:21:34.664Z"
+    },
+    {
+      "id": 2,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "asset.created",
+      "entity_type": "asset",
+      "entity_id": "1",
+      "details": {
+        "asset_tag": "AST-00101",
+        "name": "Рабочая станция Dell Precision 5820"
+      },
+      "created_at": "2026-11-24T06:21:34.664Z"
+    },
+    {
+      "id": 3,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "asset.created",
+      "entity_type": "asset",
+      "entity_id": "2",
+      "details": {
+        "asset_tag": "AST-00102",
+        "name": "Ноутбук Apple MacBook Pro 16\" M3 Max"
+      },
+      "created_at": "2026-11-24T06:21:34.664Z"
+    }
+  ],
+  "counters": {
+    "user": 3,
+    "department": 5,
+    "employee": 5,
+    "asset": 5,
+    "maintenance": 4,
+    "software": 3,
+    "audit": 21
+  }
+}
