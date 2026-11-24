@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { signOfflineLicenseToken } from '../server/licensing';
+import { hashPassword, verifyPassword } from '../server/password';
 
 const TEST_PORT = 3999;
 const TEST_LICENSE_SIGNING_KEY = 'ecc-test-offline-license-signing-key-at-least-32-bytes';
@@ -56,9 +57,57 @@ async function apiJson(route: string, token: string, init: RequestInit = {}) {
   return { status: res.status, headers: res.headers, json, text };
 }
 
+async function assertCorruptDatabaseFailsClosed(tsxBin: string) {
+  const corruptDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-corrupt-db-'));
+  const dbFile = path.join(corruptDataDir, 'ecc_store.json');
+  const corruptContents = '{"organizations":';
+  fs.writeFileSync(dbFile, corruptContents, 'utf-8');
+
+  const proc = spawn(tsxBin, ['server.ts'], {
+    env: {
+      ...process.env,
+      ECC_PORT: '3998',
+      ECC_DATA_DIR: corruptDataDir,
+      ECC_DISABLE_VITE: 'true',
+      ECC_SECRET_KEY: 'ecc-corrupt-db-test-secret-key-at-least-32-bytes',
+      ECC_LICENSE_SIGNING_KEY: 'ecc-corrupt-db-license-key-at-least-32-bytes'
+    },
+    stdio: ['ignore', 'ignore', 'pipe']
+  });
+
+  let stderr = '';
+  proc.stderr.on('data', chunk => { stderr += chunk.toString(); });
+  try {
+    const exitCode = await new Promise<number | null>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        proc.kill('SIGKILL');
+        reject(new Error('Server did not exit after detecting a corrupt database file.'));
+      }, 10000);
+      proc.once('exit', code => {
+        clearTimeout(timer);
+        resolve(code);
+      });
+    });
+    assert.notEqual(exitCode, 0, 'Server must refuse to start with a corrupt database file.');
+    assert.equal(fs.readFileSync(dbFile, 'utf-8'), corruptContents, 'Corrupt database must remain untouched.');
+    assert.match(stderr, /refusing to replace it with seed data/i);
+  } finally {
+    if (proc.pid && proc.exitCode === null) proc.kill('SIGKILL');
+    fs.rmSync(corruptDataDir, { recursive: true, force: true });
+  }
+}
+
 async function runTests() {
-  const tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-test-'));
   const tsxBin = path.resolve(process.cwd(), 'node_modules', '.bin', 'tsx');
+
+  assert.equal(verifyPassword('legacy-password', 'legacy-password'), false,
+    'Legacy plaintext password values must never authenticate.');
+  const passwordHash = hashPassword('StrongTestPassword123!');
+  assert.equal(verifyPassword('StrongTestPassword123!', passwordHash), true);
+  assert.equal(verifyPassword('WrongPassword123!', passwordHash), false);
+  await assertCorruptDatabaseFailsClosed(tsxBin);
+  console.log('✓ Password storage rejects plaintext credentials; corrupt database startup fails closed.');
+  const tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-test-'));
   const serverProc = spawn(tsxBin, ['server.ts'], {
     detached: true,
     env: {
