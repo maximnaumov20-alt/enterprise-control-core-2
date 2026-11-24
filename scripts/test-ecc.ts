@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -71,6 +71,27 @@ async function apiJson(route: string, token: string, init: RequestInit = {}) {
 async function runTests() {
   const tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-test-'));
   const tsxBin = path.resolve(process.cwd(), 'node_modules', '.bin', 'tsx');
+
+  // A missing token-signing key must stop startup rather than fall back to a public constant.
+  const missingSecretProbe = spawnSync(tsxBin, ['server.ts'], {
+    encoding: 'utf8',
+    timeout: 10000,
+    env: {
+      ...process.env,
+      ECC_PORT: String(TEST_PORT + 1),
+      ECC_DATA_DIR: path.join(tmpDataDir, 'missing-secret'),
+      ECC_SECRET_KEY: '',
+      ECC_LICENSE_SIGNING_KEY: TEST_LICENSE_SIGNING_KEY,
+      ECC_DISABLE_VITE: 'true'
+    }
+  });
+  assert.notEqual(missingSecretProbe.status, 0, 'Server must refuse startup without ECC_SECRET_KEY');
+  assert.match(
+    `${missingSecretProbe.stdout || ''}\\n${missingSecretProbe.stderr || ''}`,
+    /ECC_SECRET_KEY must be configured/
+  );
+  console.log('✓ Startup refuses a missing token-signing key');
+
   const serverProc = spawn(tsxBin, ['server.ts'], {
     detached: true,
     env: {
