@@ -317,7 +317,7 @@ function getBootstrapAdminConfig(): BootstrapAdminConfig {
   const fullName = (process.env.ECC_BOOTSTRAP_ADMIN_NAME || '').trim();
   const password = process.env.ECC_BOOTSTRAP_ADMIN_PASSWORD || '';
 
-  if (!email || !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) {
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     throw new Error('ECC_BOOTSTRAP_ADMIN_EMAIL must be set to a valid administrator email before first startup.');
   }
   if (!fullName || fullName.length > 120) {
