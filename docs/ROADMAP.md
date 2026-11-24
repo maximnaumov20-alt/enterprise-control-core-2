@@ -23,15 +23,15 @@
 - [x] Per-user access-token invalidation after password or account-active-state changes
 
 ## Phase 2 - operational readiness
-- [ ] Backup and restore procedures (local encrypted backup/restore, PostgreSQL recovery CI test, S3 uploader with full read-back checksum verification, locked backup/upload orchestration and offline fake-AWS uploader tests added; real-host scheduling, live provider upload/download recovery, immutable retention and measured RPO/RTO pending)
-- [ ] Structured logs and monitoring
+- [ ] Backup and restore procedures (SHA-256 signed JSON backup/restore, non-destructive Dry-Run verification, local snapshot store with `.sha256` sidecar & retention rotation, and audited RTO/RPO recovery drill reports implemented; external host cron scheduling and off-site S3 replication depend on target infrastructure)
+- [x] Structured logs and monitoring
 - [x] Baseline frontend security headers
 - [x] Login rate limiting with shared Redis counters
-- [ ] Additional API security headers and deployment hardening
+- [x] Additional API security headers and deployment hardening
 - [x] Python and npm dependency vulnerability scanning in GitHub Actions (`pip-audit`, `npm audit`)
 - [x] Container image vulnerability scanning for unfixed critical vulnerabilities with Trivy
 - [x] Automated PostgreSQL integration coverage in Docker Compose CI (API smoke tests, tenant-backed records, and encrypted backup/restore recovery)
-- [ ] Installation and upgrade documentation
+- [x] Installation and upgrade documentation
 - [ ] Independent security review
 
 ## Licensing and release governance

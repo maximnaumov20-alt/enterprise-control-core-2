@@ -246,7 +246,43 @@ async function downloadBackupJson(): Promise<Blob> {
   return response.blob();
 }
 
-async function uploadBackupJson(file: File): Promise<{ status: string; detail: string }> {
+export interface BackupVerifyResult {
+  valid: boolean;
+  schema_version: string;
+  exported_at: string | null;
+  checksum_status: "verified" | "not_present";
+  sha256_digest: string;
+  counts: {
+    departments: number;
+    employees: number;
+    assets: number;
+    software_licenses: number;
+    maintenance_requests: number;
+    audit_events: number;
+    recovery_drills: number;
+  };
+}
+
+async function verifyBackupJson(file: File): Promise<BackupVerifyResult> {
+  const body = new FormData();
+  body.append("file", file);
+  const response = await fetch(`${API_BASE}/api/v1/system/backup/verify`, {
+    method: "POST",
+    headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {},
+    body
+  });
+  if (!response.ok) {
+    let message = `Ошибка API: ${response.status}`;
+    try {
+      const result = await response.json();
+      if (typeof result.detail === "string") message = result.detail;
+    } catch { /* response did not contain JSON */ }
+    throw new Error(message);
+  }
+  return response.json();
+}
+
+async function uploadBackupJson(file: File): Promise<{ status: string; detail: string; verification?: Omit<BackupVerifyResult, "valid"> }> {
   const body = new FormData();
   body.append("file", file);
   const response = await fetch(`${API_BASE}/api/v1/system/restore`, {
@@ -281,10 +317,32 @@ export interface StructuredLogEntry {
   user_id: number | null;
 }
 
+export interface TelemetryAlert {
+  level: "warning" | "critical" | "info";
+  code: string;
+  message: string;
+}
+
+export interface ReadinessCheck {
+  id: string;
+  label: string;
+  status: "pass" | "warn";
+  detail: string;
+}
+
+export interface BackupSnapshot {
+  filename: string;
+  created_at: string;
+  size_bytes: number;
+  sha256_digest: string;
+  integrity_status: "verified" | "corrupted" | "missing_sidecar";
+}
+
 export interface SystemTelemetry {
   started_at: string;
   uptime_seconds: number;
   node_version: string;
+  access_token_minutes?: number;
   memory: {
     rss_mb: number;
     heap_used_mb: number;
@@ -295,19 +353,92 @@ export interface SystemTelemetry {
     size_kb: number;
     total_audit_events: number;
   };
+  backup_readiness: {
+    last_backup_at: string | null;
+    last_restore_at: string | null;
+    last_drill_at: string | null;
+    last_drill_assessment: RecoveryDrillAssessment | null;
+    total_drills: number;
+    local_snapshots_count?: number;
+  };
   requests: {
     total: number;
     api: number;
     error_4xx: number;
     error_5xx: number;
     rate_limit_blocks: number;
+    avg_duration_ms?: number;
+    p95_duration_ms?: number;
   };
+  alerts?: TelemetryAlert[];
+  readiness_checks?: ReadinessCheck[];
   security_posture: {
     id: string;
     label: string;
     status: string;
   }[];
   recent_logs: StructuredLogEntry[];
+}
+
+export type RecoveryDrillAssessment = "within_targets" | "target_exceeded" | "not_assessed";
+
+export interface RecoveryDrillReport {
+  id: number;
+  schema_version: 1;
+  report_type: "ecc_recovery_drill";
+  generated_at: string;
+  backup_reference: string;
+  timestamps: {
+    incident_at: string;
+    restore_started_at: string | null;
+    restore_completed_at: string;
+    last_committed_at: string | null;
+  };
+  measurements_seconds: {
+    observed_rto: number;
+    restore_execution: number | null;
+    observed_rpo: number | null;
+  };
+  targets_seconds: {
+    rto: number | null;
+    rpo: number | null;
+  };
+  target_met: {
+    rto: boolean | null;
+    rpo: boolean | null;
+  };
+  assessment: RecoveryDrillAssessment;
+  measurement_notes: {
+    rto: string;
+    rpo: string;
+    missing_rpo: string | null;
+  };
+}
+
+export interface RecoveryDrillInput {
+  backup_reference: string;
+  incident_at: string;
+  restore_started_at?: string | null;
+  restore_completed_at: string;
+  last_committed_at?: string | null;
+  rto_target_seconds?: number | null;
+  rpo_target_seconds?: number | null;
+}
+
+async function downloadRecoveryDrillJson(id: number): Promise<Blob> {
+  const response = await fetch(`${API_BASE}/api/v1/system/recovery-drills/${id}/download`, {
+    headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {}
+  });
+  if (!response.ok) throw new Error(`Ошибка API: ${response.status}`);
+  return response.blob();
+}
+
+async function downloadBackupSnapshotBlob(filename: string): Promise<Blob> {
+  const response = await fetch(`${API_BASE}/api/v1/system/backup/snapshots/${encodeURIComponent(filename)}/download`, {
+    headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {}
+  });
+  if (!response.ok) throw new Error(`Ошибка API: ${response.status}`);
+  return response.blob();
 }
 
 export const api = {
@@ -326,14 +457,40 @@ export const api = {
   stats: () => request<SystemStats>("/api/v1/system/stats"),
   telemetry: () => request<SystemTelemetry>("/api/v1/system/telemetry"),
   backup: () => downloadBackupJson(),
+  verifyBackup: (file: File) => verifyBackupJson(file),
   restore: (file: File) => uploadBackupJson(file),
+  backupSnapshots: () => request<BackupSnapshot[]>("/api/v1/system/backup/snapshots"),
+  createBackupSnapshot: () => request<BackupSnapshot>("/api/v1/system/backup/snapshots", { method: "POST" }),
+  downloadBackupSnapshot: (filename: string) => downloadBackupSnapshotBlob(filename),
+  deleteBackupSnapshot: (filename: string) =>
+    request<void>(`/api/v1/system/backup/snapshots/${encodeURIComponent(filename)}`, { method: "DELETE" }),
+  recoveryDrills: () => request<RecoveryDrillReport[]>("/api/v1/system/recovery-drills"),
+  createRecoveryDrill: (payload: RecoveryDrillInput) =>
+    request<RecoveryDrillReport>("/api/v1/system/recovery-drills", { method: "POST", body: JSON.stringify(payload) }),
+  downloadRecoveryDrill: (id: number) => downloadRecoveryDrillJson(id),
   assignees: () => request<AssigneeOption[]>("/api/v1/users/assignees"),
   users: () => request<ManagedUser[]>("/api/v1/users"),
   createUser: (user: { email: string; full_name: string; password: string; role: UserRole }) =>
     request<ManagedUser>("/api/v1/users", { method: "POST", body: JSON.stringify(user) }),
   updateUser: (id: number, changes: { expected_version: number; full_name?: string; role?: UserRole; is_active?: boolean }) =>
     request<ManagedUser>(`/api/v1/users/${id}`, { method: "PATCH", body: JSON.stringify(changes) }),
-  auditEvents: (limit = 100, entity_type = "") => request<AuditEvent[]>(`/api/v1/audit-events?limit=${limit}${entity_type ? `&entity_type=${encodeURIComponent(entity_type)}` : ""}`),
+  auditEvents: (limit = 100, entity_type = "", search = "") => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (entity_type) params.set("entity_type", entity_type);
+    if (search) params.set("search", search);
+    return request<AuditEvent[]>(`/api/v1/audit-events?${params.toString()}`);
+  },
+  exportAuditCsv: async (entity_type = "", search = ""): Promise<Blob> => {
+    const params = new URLSearchParams();
+    if (entity_type) params.set("entity_type", entity_type);
+    if (search) params.set("search", search);
+    const qs = params.toString();
+    const response = await fetch(`${API_BASE}/api/v1/audit-events/export${qs ? `?${qs}` : ""}`, {
+      headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {}
+    });
+    if (!response.ok) throw new Error(`Ошибка API: ${response.status}`);
+    return response.blob();
+  },
   departments: () => request<Department[]>("/api/v1/departments"),
   createDepartment: (item: { name: string; code: string }) =>
     request<Department>("/api/v1/departments", { method: "POST", body: JSON.stringify(item) }),
@@ -350,11 +507,12 @@ export const api = {
   maintenanceRequests: () => request<MaintenanceRequest[]>("/api/v1/maintenance-requests?limit=200"),
   createMaintenanceRequest: (item: MaintenanceRequestInput) =>
     request<MaintenanceRequest>("/api/v1/maintenance-requests", { method: "POST", body: JSON.stringify(item) }),
-  updateMaintenanceRequest: (id: number, changes: { expected_version: number; status?: MaintenanceStatus; assigned_to_user_id?: number | null }) =>
+  updateMaintenanceRequest: (id: number, changes: { expected_version: number; status?: MaintenanceStatus; priority?: MaintenancePriority; assigned_to_user_id?: number | null }) =>
     request<MaintenanceRequest>(`/api/v1/maintenance-requests/${id}`, { method: "PATCH", body: JSON.stringify(changes) }),
   deleteMaintenanceRequest: (id: number) =>
     request<void>(`/api/v1/maintenance-requests/${id}`, { method: "DELETE" }),
-  softwareLicenses: () => request<SoftwareLicense[]>("/api/v1/software-licenses?limit=200"),
+  softwareLicenses: (search = "") =>
+    request<SoftwareLicense[]>(`/api/v1/software-licenses?limit=200${search ? `&search=${encodeURIComponent(search)}` : ""}`),
   createSoftwareLicense: (license: SoftwareLicenseInput) =>
     request<SoftwareLicense>("/api/v1/software-licenses", { method: "POST", body: JSON.stringify(license) }),
   updateSoftwareLicense: (id: number, license: Partial<SoftwareLicenseInput> & { expected_version: number }) =>

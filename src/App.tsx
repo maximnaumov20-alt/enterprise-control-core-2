@@ -7,6 +7,8 @@ import {
   AssetHistoryEvent,
   AssigneeOption,
   AuditEvent,
+  BackupSnapshot,
+  BackupVerifyResult,
   CurrentUser,
   Department,
   Employee,
@@ -16,6 +18,8 @@ import {
   MaintenanceRequestInput,
   MaintenanceStatus,
   ManagedUser,
+  RecoveryDrillAssessment,
+  RecoveryDrillReport,
   SoftwareLicense,
   SoftwareLicenseInput,
   SoftwareLicenseStatus,
@@ -201,6 +205,8 @@ export default function App() {
 
   const [telemetry, setTelemetry] = useState<SystemTelemetry | null>(null);
   const [telemetryLoading, setTelemetryLoading] = useState(false);
+  const [logStatusFilter, setLogStatusFilter] = useState<"all" | "2xx" | "4xx" | "5xx">("all");
+  const [logPathSearch, setLogPathSearch] = useState("");
 
   const [departments, setDepartments] = useState<Department[]>([]);
   const [employees, setEmployees] = useState<Employee[]>([]);
@@ -222,6 +228,7 @@ export default function App() {
   const [maintenancePriorityFilter, setMaintenancePriorityFilter] = useState<string>("all");
 
   const [softwareLicenses, setSoftwareLicenses] = useState<SoftwareLicense[]>([]);
+  const [softwareSearch, setSoftwareSearch] = useState("");
   const [softwareForm, setSoftwareForm] = useState<SoftwareLicenseInput>(emptySoftwareForm);
   const [editingSoftwareId, setEditingSoftwareId] = useState<number | null>(null);
   const [softwareSaving, setSoftwareSaving] = useState(false);
@@ -230,6 +237,8 @@ export default function App() {
   const [users, setUsers] = useState<ManagedUser[]>([]);
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [auditEntityFilter, setAuditEntityFilter] = useState<string>("");
+  const [auditSearch, setAuditSearch] = useState("");
+  const [auditLimit, setAuditLimit] = useState(100);
   const [userForm, setUserForm] = useState({ email: "", full_name: "", password: "", role: "viewer" as UserRole });
   const [userSaving, setUserSaving] = useState(false);
   const [showPasswordForm, setShowPasswordForm] = useState(false);
@@ -238,7 +247,22 @@ export default function App() {
   const [passwordSaving, setPasswordSaving] = useState(false);
 
   const [backupFile, setBackupFile] = useState<File | null>(null);
+  const [backupVerification, setBackupVerification] = useState<BackupVerifyResult | null>(null);
+  const [backupVerifying, setBackupVerifying] = useState(false);
   const [backupRestoring, setBackupRestoring] = useState(false);
+  const [backupSnapshots, setBackupSnapshots] = useState<BackupSnapshot[]>([]);
+  const [snapshotCreating, setSnapshotCreating] = useState(false);
+  const [recoveryDrills, setRecoveryDrills] = useState<RecoveryDrillReport[]>([]);
+  const [drillSaving, setDrillSaving] = useState(false);
+  const [drillForm, setDrillForm] = useState({
+    backup_reference: "",
+    incident_at: "",
+    restore_started_at: "",
+    restore_completed_at: "",
+    last_committed_at: "",
+    rto_target_seconds: "900",
+    rpo_target_seconds: ""
+  });
 
   async function loadOverview(roleOverride?: UserRole) {
     setStatsLoading(true);
@@ -522,6 +546,19 @@ export default function App() {
     }
   }
 
+  async function changeMaintenancePriority(item: MaintenanceRequest, priority: MaintenancePriority) {
+    setError("");
+    try {
+      await api.updateMaintenanceRequest(item.id, {
+        expected_version: item.version,
+        priority
+      });
+      setMaintenanceRequests(await api.maintenanceRequests());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось изменить приоритет заявки");
+    }
+  }
+
   async function changeMaintenanceAssignee(item: MaintenanceRequest, assignedToUserId: number | null) {
     setError("");
     try {
@@ -547,11 +584,11 @@ export default function App() {
     }
   }
 
-  async function openSoftware() {
+  async function openSoftware(searchTerm = softwareSearch) {
     setSection("software");
     setError("");
     try {
-      setSoftwareLicenses(await api.softwareLicenses());
+      setSoftwareLicenses(await api.softwareLicenses(searchTerm));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Не удалось загрузить лицензии ПО");
     }
@@ -603,7 +640,7 @@ export default function App() {
       }
       setEditingSoftwareId(null);
       setSoftwareForm(emptySoftwareForm);
-      setSoftwareLicenses(await api.softwareLicenses());
+      setSoftwareLicenses(await api.softwareLicenses(softwareSearch));
       setNotice("Лицензия успешно сохранена.");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Не удалось сохранить лицензию");
@@ -621,7 +658,7 @@ export default function App() {
         expected_version: item.record_version,
         seats_used: nextSeats
       });
-      setSoftwareLicenses(await api.softwareLicenses());
+      setSoftwareLicenses(await api.softwareLicenses(softwareSearch));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Не удалось обновить количество мест");
     }
@@ -630,7 +667,7 @@ export default function App() {
   function exportSoftwareCsv() {
     const escapeCell = (val: unknown) => {
       let s = val == null ? "" : String(val);
-      if (s.length > 0 && ["=", "+", "-", "@"].includes(s[0])) {
+      if (/^[=+\-@]/.test(s.replace(/^[ \t\r\n]+/, "")) || /^[\t\r\n]/.test(s)) {
         s = `'${s}`;
       }
       return `"${s.replace(/"/g, '""')}"`;
@@ -667,7 +704,7 @@ export default function App() {
     setError("");
     try {
       await api.deleteSoftwareLicense(item.id);
-      setSoftwareLicenses(await api.softwareLicenses());
+      setSoftwareLicenses(await api.softwareLicenses(softwareSearch));
       setNotice("Лицензия удалена.");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Не удалось удалить лицензию");
@@ -710,20 +747,161 @@ export default function App() {
     }
   }
 
-  async function openAudit(filter = auditEntityFilter) {
+  async function openAudit(filter = auditEntityFilter, searchTerm = auditSearch, limitVal = auditLimit) {
     setSection("audit");
     setError("");
     try {
-      setEvents(await api.auditEvents(100, filter));
+      const [auditList, usersList] = await Promise.all([
+        api.auditEvents(limitVal, filter, searchTerm),
+        users.length === 0 ? api.users() : Promise.resolve(users)
+      ]);
+      setEvents(auditList);
+      if (users.length === 0) setUsers(usersList);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Не удалось загрузить журнал аудита");
+    }
+  }
+
+  async function exportAuditCsv() {
+    setError("");
+    try {
+      const blob = await api.exportAuditCsv(auditEntityFilter, auditSearch);
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `ecc-audit-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      window.URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось экспортировать журнал аудита");
     }
   }
 
   async function openBackups() {
     setSection("backups");
     setError("");
-    await loadOverview();
+    try {
+      const [, drills, snapshots] = await Promise.all([
+        loadOverview(),
+        api.recoveryDrills(),
+        api.backupSnapshots()
+      ]);
+      setRecoveryDrills(drills);
+      setBackupSnapshots(snapshots);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось загрузить отчёты по восстановлению");
+    }
+  }
+
+  async function createSnapshotNow() {
+    setSnapshotCreating(true);
+    setError("");
+    try {
+      const created = await api.createBackupSnapshot();
+      setBackupSnapshots(await api.backupSnapshots());
+      setNotice(`Создан локальный снимок ${created.filename} (SHA-256 проверен).`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось создать снимок резервной копии");
+    } finally {
+      setSnapshotCreating(false);
+    }
+  }
+
+  async function downloadSnapshotFile(snapshot: BackupSnapshot) {
+    setError("");
+    try {
+      const blob = await api.downloadBackupSnapshot(snapshot.filename);
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = snapshot.filename;
+      a.click();
+      window.URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось скачать локальный снимок");
+    }
+  }
+
+  async function deleteSnapshotFile(snapshot: BackupSnapshot) {
+    if (!confirm(`Удалить локальный снимок «${snapshot.filename}»?`)) return;
+    setError("");
+    try {
+      await api.deleteBackupSnapshot(snapshot.filename);
+      setBackupSnapshots(await api.backupSnapshots());
+      setNotice(`Снимок ${snapshot.filename} удалён.`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось удалить снимок");
+    }
+  }
+
+  function useSnapshotForDrill(snapshot: BackupSnapshot) {
+    const now = Date.now();
+    setDrillForm(prev => ({
+      ...prev,
+      backup_reference: snapshot.filename,
+      incident_at: prev.incident_at || new Date(now - 9 * 60 * 1000).toISOString(),
+      restore_started_at: prev.restore_started_at || new Date(now - 7 * 60 * 1000).toISOString(),
+      restore_completed_at: prev.restore_completed_at || new Date(now - 1 * 60 * 1000).toISOString(),
+      last_committed_at: prev.last_committed_at || snapshot.created_at,
+      rto_target_seconds: prev.rto_target_seconds || "900",
+      rpo_target_seconds: prev.rpo_target_seconds || "300"
+    }));
+    setNotice(`Ссылка на снимок ${snapshot.filename} подставлена в форму учений DR.`);
+  }
+
+  function fillRehearsalTimestamps() {
+    const now = Date.now();
+    const committed = new Date(now - 12 * 60 * 1000).toISOString();
+    const incident = new Date(now - 9 * 60 * 1000).toISOString();
+    const started = new Date(now - 7 * 60 * 1000).toISOString();
+    const completed = new Date(now - 1 * 60 * 1000).toISOString();
+    setDrillForm({
+      backup_reference: `ecc-backup-${new Date(now).toISOString().slice(0, 10)}.json`,
+      incident_at: incident,
+      restore_started_at: started,
+      restore_completed_at: completed,
+      last_committed_at: committed,
+      rto_target_seconds: "900",
+      rpo_target_seconds: "300"
+    });
+  }
+
+  async function submitRecoveryDrill(event: FormEvent) {
+    event.preventDefault();
+    setDrillSaving(true);
+    setError("");
+    try {
+      await api.createRecoveryDrill({
+        backup_reference: drillForm.backup_reference.trim(),
+        incident_at: drillForm.incident_at.trim(),
+        restore_started_at: drillForm.restore_started_at.trim() || null,
+        restore_completed_at: drillForm.restore_completed_at.trim(),
+        last_committed_at: drillForm.last_committed_at.trim() || null,
+        rto_target_seconds: drillForm.rto_target_seconds.trim() ? Number(drillForm.rto_target_seconds.trim()) : null,
+        rpo_target_seconds: drillForm.rpo_target_seconds.trim() ? Number(drillForm.rpo_target_seconds.trim()) : null
+      });
+      setRecoveryDrills(await api.recoveryDrills());
+      setNotice("Отчёт об учениях по восстановлению (RTO/RPO) сохранён.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось создать отчёт об учениях");
+    } finally {
+      setDrillSaving(false);
+    }
+  }
+
+  async function downloadDrillJson(drill: RecoveryDrillReport) {
+    setError("");
+    try {
+      const blob = await api.downloadRecoveryDrill(drill.id);
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `ecc-recovery-drill-${drill.id}.json`;
+      a.click();
+      window.URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось скачать отчёт");
+    }
   }
 
   async function openMonitoring() {
@@ -739,6 +917,24 @@ export default function App() {
     } finally {
       setTelemetryLoading(false);
     }
+  }
+
+  function exportTelemetryLogsJson() {
+    if (!telemetry) return;
+    const payload = {
+      exported_at: new Date().toISOString(),
+      filter_status: logStatusFilter,
+      filter_path: logPathSearch.trim() || null,
+      count: filteredLogs.length,
+      logs: filteredLogs
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8;" });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `ecc-http-logs-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    window.URL.revokeObjectURL(url);
   }
 
   async function downloadBackup() {
@@ -757,6 +953,23 @@ export default function App() {
     }
   }
 
+  async function runBackupVerify(fileOverride?: File | null) {
+    const target = fileOverride ?? backupFile;
+    if (!target) return;
+    setBackupVerifying(true);
+    setBackupVerification(null);
+    setError("");
+    try {
+      const result = await api.verifyBackup(target);
+      setBackupVerification(result);
+    } catch (e) {
+      setBackupVerification(null);
+      setError(e instanceof Error ? e.message : "Проверка целостности резервной копии не пройдена");
+    } finally {
+      setBackupVerifying(false);
+    }
+  }
+
   async function restoreBackupSubmit(event: FormEvent) {
     event.preventDefault();
     if (!backupFile) {
@@ -770,6 +983,7 @@ export default function App() {
       const res = await api.restore(backupFile);
       setNotice(res.detail || "Данные успешно восстановлены.");
       setBackupFile(null);
+      setBackupVerification(null);
       await loadOverview();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Ошибка восстановления данных");
@@ -939,8 +1153,28 @@ export default function App() {
 
   const filteredSoftware = useMemo(() => {
     if (softwareStatusFilter === "all") return softwareLicenses;
+    if (softwareStatusFilter === "expiring") {
+      const sixtyDaysFromNow = Date.now() + 60 * 24 * 60 * 60 * 1000;
+      return softwareLicenses.filter(
+        s => s.status === "active" && Boolean(s.expires_at) && new Date(s.expires_at as string).getTime() < sixtyDaysFromNow
+      );
+    }
     return softwareLicenses.filter(s => s.status === softwareStatusFilter);
   }, [softwareLicenses, softwareStatusFilter]);
+
+  const filteredLogs = useMemo(() => {
+    if (!telemetry) return [];
+    const q = logPathSearch.trim().toLowerCase();
+    return telemetry.recent_logs.filter(log => {
+      const matchStatus =
+        logStatusFilter === "all" ||
+        (logStatusFilter === "2xx" && log.status >= 200 && log.status < 300) ||
+        (logStatusFilter === "4xx" && log.status >= 400 && log.status < 500) ||
+        (logStatusFilter === "5xx" && log.status >= 500);
+      const matchPath = !q || log.path.toLowerCase().includes(q) || log.method.toLowerCase().includes(q);
+      return matchStatus && matchPath;
+    });
+  }, [telemetry, logStatusFilter, logPathSearch]);
 
   const counts = useMemo(() => {
     const total = assets.length;
@@ -1344,6 +1578,71 @@ export default function App() {
                     </div>
                   </div>
                 </div>
+
+                {(stats.software.expiring_soon > 0 || stats.maintenance.urgent_or_high > 0 || stats.assets.in_repair > 0) && (
+                  <section className="panel">
+                    <div className="panel-heading">
+                      <div>
+                        <h2>Операционные предупреждения</h2>
+                        <p>Позиции, требующие внимания IT-службы</p>
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                      {stats.software.expiring_soon > 0 && (
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", paddingBottom: "8px", borderBottom: "1px solid #f1f5f9", flexWrap: "wrap" }}>
+                          <span style={{ fontSize: "13px", color: "#334155" }}>
+                            <strong style={{ color: "#d97706" }}>Истекающие лицензии ПО:</strong> {stats.software.expiring_soon} активных подписок заканчиваются в ближайшие 60 дней.
+                          </span>
+                          <button
+                            type="button"
+                            className="subtle"
+                            onClick={() => {
+                              setSoftwareStatusFilter("expiring");
+                              void openSoftware(softwareSearch);
+                            }}
+                          >
+                            Проверить лицензии →
+                          </button>
+                        </div>
+                      )}
+                      {stats.maintenance.urgent_or_high > 0 && (
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", paddingBottom: "8px", borderBottom: "1px solid #f1f5f9", flexWrap: "wrap" }}>
+                          <span style={{ fontSize: "13px", color: "#334155" }}>
+                            <strong style={{ color: "#dc2626" }}>Срочные и приоритетные заявки:</strong> {stats.maintenance.urgent_or_high} открытых или в работе обращений требуют реакции.
+                          </span>
+                          <button
+                            type="button"
+                            className="subtle"
+                            onClick={() => {
+                              setMaintenanceStatusFilter("all");
+                              setMaintenancePriorityFilter("urgent");
+                              void openMaintenance();
+                            }}
+                          >
+                            Открыть заявки →
+                          </button>
+                        </div>
+                      )}
+                      {stats.assets.in_repair > 0 && (
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
+                          <span style={{ fontSize: "13px", color: "#334155" }}>
+                            <strong style={{ color: "#0f172a" }}>Оборудование в ремонте:</strong> {stats.assets.in_repair} ед. техники временно выведены из эксплуатации.
+                          </span>
+                          <button
+                            type="button"
+                            className="subtle"
+                            onClick={() => {
+                              setAssetStatusFilter("in_repair");
+                              setSection("assets");
+                            }}
+                          >
+                            К списку в ремонте →
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </section>
+                )}
 
                 <div className="section-split">
                   <div className="panel">
@@ -1835,15 +2134,26 @@ export default function App() {
                   <h2>Реестр лицензий</h2>
                   <p>{filteredSoftware.length} записей</p>
                 </div>
-                <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" }}>
+                  <input
+                    className="search"
+                    value={softwareSearch}
+                    onChange={e => {
+                      const term = e.target.value;
+                      setSoftwareSearch(term);
+                      void openSoftware(term);
+                    }}
+                    placeholder="⌕  Поиск по названию, издателю, договору..."
+                  />
                   <select value={softwareStatusFilter} onChange={e => setSoftwareStatusFilter(e.target.value)} style={{ fontSize: "11px", padding: "6px" }}>
                     <option value="all">Все статусы</option>
                     <option value="active">Только активные</option>
+                    <option value="expiring">Истекают (&lt; 60 дн.)</option>
                     <option value="suspended">Приостановленные</option>
                     <option value="retired">Закрытые</option>
                   </select>
                   <button type="button" className="subtle" onClick={exportSoftwareCsv}>Экспорт CSV</button>
-                  <button type="button" className="subtle" onClick={() => void openSoftware()}>Обновить</button>
+                  <button type="button" className="subtle" onClick={() => void openSoftware(softwareSearch)}>Обновить</button>
                 </div>
               </div>
 
@@ -2050,9 +2360,22 @@ export default function App() {
                               {targetAsset ? <span><strong>{targetAsset.asset_tag}</strong><small>{targetAsset.name}</small></span> : `#${item.asset_id}`}
                             </td>
                             <td>
-                              <span style={{ fontWeight: 600, color: item.priority === "urgent" ? "#dc2626" : item.priority === "high" ? "#ea580c" : "#475569" }}>
-                                {maintenancePriorityLabels[item.priority]}
-                              </span>
+                              {currentUser.role === "viewer" ? (
+                                <span style={{ fontWeight: 600, color: item.priority === "urgent" ? "#dc2626" : item.priority === "high" ? "#ea580c" : "#475569" }}>
+                                  {maintenancePriorityLabels[item.priority]}
+                                </span>
+                              ) : (
+                                <select
+                                  value={item.priority}
+                                  onChange={e => void changeMaintenancePriority(item, e.target.value as MaintenancePriority)}
+                                  style={{ fontWeight: 600, color: item.priority === "urgent" ? "#dc2626" : item.priority === "high" ? "#ea580c" : "#475569" }}
+                                >
+                                  <option value="low">Низкий</option>
+                                  <option value="normal">Обычный</option>
+                                  <option value="high">Высокий</option>
+                                  <option value="urgent">Срочно</option>
+                                </select>
+                              )}
                             </td>
                             <td>
                               {currentUser.role === "viewer" ? (
@@ -2419,12 +2742,23 @@ export default function App() {
                 <h1>Журнал действий</h1>
                 <p>Аудит событий и изменений в текущей организации</p>
               </div>
-              <div style={{ display: "flex", gap: "8px" }}>
+              <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" }}>
+                <input
+                  className="search"
+                  value={auditSearch}
+                  onChange={e => {
+                    const term = e.target.value;
+                    setAuditSearch(term);
+                    void openAudit(auditEntityFilter, term, auditLimit);
+                  }}
+                  placeholder="⌕  Поиск по действию, объекту, деталям..."
+                />
                 <select
                   value={auditEntityFilter}
                   onChange={e => {
-                    setAuditEntityFilter(e.target.value);
-                    void openAudit(e.target.value);
+                    const nextEntity = e.target.value;
+                    setAuditEntityFilter(nextEntity);
+                    void openAudit(nextEntity, auditSearch, auditLimit);
                   }}
                   style={{ fontSize: "11px", padding: "6px" }}
                 >
@@ -2433,10 +2767,26 @@ export default function App() {
                   <option value="software_license">Лицензии ПО</option>
                   <option value="maintenance_request">Обслуживание</option>
                   <option value="employee">Сотрудники</option>
+                  <option value="department">Подразделения</option>
                   <option value="user">Пользователи</option>
                   <option value="system">Система</option>
                 </select>
-                <button className="subtle" onClick={() => void openAudit()}>Обновить</button>
+                <select
+                  value={auditLimit}
+                  onChange={e => {
+                    const nextLimit = Number(e.target.value);
+                    setAuditLimit(nextLimit);
+                    void openAudit(auditEntityFilter, auditSearch, nextLimit);
+                  }}
+                  style={{ fontSize: "11px", padding: "6px" }}
+                  aria-label="Лимит записей аудита"
+                >
+                  <option value={50}>50 записей</option>
+                  <option value={100}>100 записей</option>
+                  <option value={200}>200 записей</option>
+                </select>
+                <button type="button" className="subtle" onClick={() => void exportAuditCsv()}>Экспорт CSV</button>
+                <button type="button" className="subtle" onClick={() => void openAudit(auditEntityFilter, auditSearch, auditLimit)}>Обновить</button>
               </div>
             </div>
 
@@ -2448,22 +2798,34 @@ export default function App() {
                   <thead>
                     <tr>
                       <th>ВРЕМЯ</th>
-                      <th>ПОЛЬЗОВАТЕЛЬ ID</th>
+                      <th>ИНИЦИАТОР</th>
                       <th>ДЕЙСТВИЕ</th>
                       <th>ОБЪЕКТ</th>
                       <th>ДЕТАЛИ</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {events.map(event => (
-                      <tr key={event.id}>
-                        <td>{new Date(event.created_at).toLocaleString()}</td>
-                        <td>{event.actor_user_id ?? "—"}</td>
-                        <td><strong>{event.action}</strong></td>
-                        <td>{event.entity_type} #{event.entity_id}</td>
-                        <td className="audit-details">{JSON.stringify(event.details)}</td>
-                      </tr>
-                    ))}
+                    {events.map(event => {
+                      const actor = event.actor_user_id ? users.find(u => u.id === event.actor_user_id) : undefined;
+                      return (
+                        <tr key={event.id}>
+                          <td>{new Date(event.created_at).toLocaleString()}</td>
+                          <td>
+                            {actor ? (
+                              <span>
+                                <strong>{actor.full_name}</strong>
+                                <small className="mono">#{actor.id}</small>
+                              </span>
+                            ) : (
+                              <span className="mono">{event.actor_user_id ? `#${event.actor_user_id}` : "—"}</span>
+                            )}
+                          </td>
+                          <td><strong>{event.action}</strong></td>
+                          <td>{event.entity_type} #{event.entity_id}</td>
+                          <td className="audit-details">{JSON.stringify(event.details)}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -2515,16 +2877,281 @@ export default function App() {
                     <input
                       type="file"
                       accept=".json,application/json"
-                      onChange={e => setBackupFile(e.target.files?.[0] || null)}
+                      onChange={e => {
+                        const file = e.target.files?.[0] || null;
+                        setBackupFile(file);
+                        setBackupVerification(null);
+                        if (file) {
+                          void runBackupVerify(file);
+                        }
+                      }}
                       style={{ display: "block", marginTop: "8px" }}
                     />
                   </label>
-                  <button type="submit" className="primary" style={{ marginTop: "12px", background: "#d97706" }} disabled={!backupFile || backupRestoring}>
-                    {backupRestoring ? "Восстановление..." : "Восстановить данные"}
-                  </button>
+                  {backupVerifying && (
+                    <p style={{ fontSize: "12px", color: "#64748b", margin: "8px 0" }}>
+                      Проверка структуры и контрольной суммы SHA-256...
+                    </p>
+                  )}
+                  {backupVerification && (
+                    <div style={{ margin: "10px 0", padding: "10px 12px", border: "1px solid #cbd5e1", background: "#f8fafc", fontSize: "12px", lineHeight: 1.6 }}>
+                      <div>
+                        <strong style={{ color: backupVerification.checksum_status === "verified" ? "#15803d" : "#d97706" }}>
+                          {backupVerification.checksum_status === "verified"
+                            ? "SHA-256 контрольная сумма подтверждена"
+                            : "Файл без подписи SHA-256 (совместимость)"}
+                        </strong>
+                        {" · "}Схема v{backupVerification.schema_version}
+                      </div>
+                      <div className="mono" style={{ fontSize: "11px", color: "#475569", wordBreak: "break-all" }}>
+                        SHA-256: {backupVerification.sha256_digest}
+                      </div>
+                      <div style={{ color: "#334155", marginTop: "4px" }}>
+                        Активов: <strong>{backupVerification.counts.assets}</strong> · Лицензий: <strong>{backupVerification.counts.software_licenses}</strong> · Заявок: <strong>{backupVerification.counts.maintenance_requests}</strong> · Сотрудников: <strong>{backupVerification.counts.employees}</strong> · Аудит: <strong>{backupVerification.counts.audit_events}</strong>
+                      </div>
+                    </div>
+                  )}
+                  <div style={{ display: "flex", gap: "8px", marginTop: "12px", flexWrap: "wrap" }}>
+                    <button
+                      type="button"
+                      className="subtle"
+                      disabled={!backupFile || backupVerifying}
+                      onClick={() => void runBackupVerify()}
+                    >
+                      Проверить (Dry-Run)
+                    </button>
+                    <button type="submit" className="primary" style={{ background: "#d97706" }} disabled={!backupFile || backupRestoring || backupVerifying || !backupVerification?.valid}>
+                      {backupRestoring ? "Восстановление..." : "Восстановить данные"}
+                    </button>
+                  </div>
                 </form>
               </section>
             </div>
+
+            <section className="panel inventory">
+              <div className="panel-heading">
+                <div>
+                  <h2>Локальные снимки и хранение (Backup Retention)</h2>
+                  <p>Хранилище серверных снимков с sidecar-файлом SHA-256 и автоматической ротацией</p>
+                </div>
+                <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                  <button
+                    type="button"
+                    className="primary"
+                    disabled={snapshotCreating}
+                    onClick={() => void createSnapshotNow()}
+                  >
+                    {snapshotCreating ? "Создание..." : "Создать снимок в хранилище"}
+                  </button>
+                  <button type="button" className="subtle" onClick={() => void openBackups()}>Обновить</button>
+                </div>
+              </div>
+              {backupSnapshots.length === 0 ? (
+                <div className="empty">Локальных снимков пока нет. Нажмите «Создать снимок в хранилище».</div>
+              ) : (
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>ФАЙЛ СНИМКА</th>
+                        <th>СОЗДАН</th>
+                        <th>РАЗМЕР</th>
+                        <th>ЦЕЛОСТНОСТЬ SHA-256</th>
+                        <th>ДЕЙСТВИЯ</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {backupSnapshots.map(snap => (
+                        <tr key={snap.filename}>
+                          <td>
+                            <strong className="mono">{snap.filename}</strong>
+                            {snap.sha256_digest && <small className="mono">{snap.sha256_digest.slice(0, 24)}...</small>}
+                          </td>
+                          <td>{new Date(snap.created_at).toLocaleString()}</td>
+                          <td className="mono">{(snap.size_bytes / 1024).toFixed(1)} KB</td>
+                          <td
+                            style={{
+                              fontWeight: 600,
+                              color:
+                                snap.integrity_status === "verified"
+                                  ? "#15803d"
+                                  : snap.integrity_status === "corrupted"
+                                  ? "#dc2626"
+                                  : "#d97706"
+                            }}
+                          >
+                            {snap.integrity_status === "verified"
+                              ? "SHA-256 подтверждён"
+                              : snap.integrity_status === "corrupted"
+                              ? "Повреждён"
+                              : "Нет .sha256 sidecar"}
+                          </td>
+                          <td className="actions">
+                            <button type="button" onClick={() => void downloadSnapshotFile(snap)}>Скачать</button>
+                            <button type="button" onClick={() => useSnapshotForDrill(snap)}>Учение DR</button>
+                            <button type="button" className="danger" onClick={() => void deleteSnapshotFile(snap)}>Удалить</button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+
+            <section className="panel">
+              <div className="panel-heading">
+                <div>
+                  <h2>Учения по восстановлению (Recovery Drill Report · PR #96)</h2>
+                  <p>Аудируемый расчёт фактических RTO и RPO по ISO-8601 меткам времени с часовым поясом</p>
+                </div>
+                <button type="button" className="subtle" onClick={fillRehearsalTimestamps}>
+                  Подставить тестовые метки (UTC)
+                </button>
+              </div>
+              <form onSubmit={submitRecoveryDrill}>
+                <div className="form-grid user-form-grid">
+                  <label>
+                    Ссылка на резервную копию *
+                    <input
+                      required
+                      value={drillForm.backup_reference}
+                      onChange={e => setDrillForm({ ...drillForm, backup_reference: e.target.value })}
+                      placeholder="ecc-postgres-20261124T060000Z.dump.age"
+                    />
+                  </label>
+                  <label>
+                    Время инцидента (ISO + TZ) *
+                    <input
+                      required
+                      value={drillForm.incident_at}
+                      onChange={e => setDrillForm({ ...drillForm, incident_at: e.target.value })}
+                      placeholder="2026-11-24T06:10:00Z"
+                    />
+                  </label>
+                  <label>
+                    Начало восстановления (опц.)
+                    <input
+                      value={drillForm.restore_started_at}
+                      onChange={e => setDrillForm({ ...drillForm, restore_started_at: e.target.value })}
+                      placeholder="2026-11-24T06:12:00Z"
+                    />
+                  </label>
+                  <label>
+                    Завершение восстановления (ISO + TZ) *
+                    <input
+                      required
+                      value={drillForm.restore_completed_at}
+                      onChange={e => setDrillForm({ ...drillForm, restore_completed_at: e.target.value })}
+                      placeholder="2026-11-24T06:18:00Z"
+                    />
+                  </label>
+                  <label>
+                    Последняя транзакция (опц.)
+                    <input
+                      value={drillForm.last_committed_at}
+                      onChange={e => setDrillForm({ ...drillForm, last_committed_at: e.target.value })}
+                      placeholder="2026-11-24T06:07:00Z"
+                    />
+                  </label>
+                  <label>
+                    Целевой RTO (сек, опц.)
+                    <input
+                      type="number"
+                      min={1}
+                      value={drillForm.rto_target_seconds}
+                      onChange={e => setDrillForm({ ...drillForm, rto_target_seconds: e.target.value })}
+                      placeholder="900"
+                    />
+                  </label>
+                  <label>
+                    Целевой RPO (сек, опц.)
+                    <input
+                      type="number"
+                      min={1}
+                      value={drillForm.rpo_target_seconds}
+                      onChange={e => setDrillForm({ ...drillForm, rpo_target_seconds: e.target.value })}
+                      placeholder="300"
+                    />
+                  </label>
+                </div>
+                <div className="form-actions">
+                  <span className="required-note">
+                    Если последняя транзакция не указана, RPO остаётся не измеренным (не вычисляется по возрасту копии)
+                  </span>
+                  <button type="submit" className="primary" disabled={drillSaving}>
+                    {drillSaving ? "Расчёт..." : "Зафиксировать отчёт об учениях"}
+                  </button>
+                </div>
+              </form>
+            </section>
+
+            <section className="panel inventory">
+              <div className="panel-heading">
+                <div>
+                  <h2>Журнал отчётов по восстановлению</h2>
+                  <p>{recoveryDrills.length} зафиксированных учений</p>
+                </div>
+                <button type="button" className="subtle" onClick={() => void openBackups()}>Обновить</button>
+              </div>
+              {recoveryDrills.length === 0 ? (
+                <div className="empty">Отчёты об учениях по восстановлению ещё не создавались.</div>
+              ) : (
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>КОПИЯ</th>
+                        <th>OBSERVED RTO</th>
+                        <th>EXECUTION</th>
+                        <th>OBSERVED RPO</th>
+                        <th>ОЦЕНКА</th>
+                        <th>СФОРМИРОВАН</th>
+                        <th>ДЕЙСТВИЯ</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {recoveryDrills.map(drill => {
+                        const assessmentLabel: Record<RecoveryDrillAssessment, string> = {
+                          within_targets: "В рамках целей",
+                          target_exceeded: "Превышение цели",
+                          not_assessed: "Не оценивалось"
+                        };
+                        const assessmentColor =
+                          drill.assessment === "within_targets"
+                            ? "#15803d"
+                            : drill.assessment === "target_exceeded"
+                            ? "#dc2626"
+                            : "#64748b";
+                        return (
+                          <tr key={drill.id}>
+                            <td className="mono"><strong>{drill.backup_reference}</strong></td>
+                            <td className="mono">
+                              {drill.measurements_seconds.observed_rto} с
+                              {drill.targets_seconds.rto !== null && <small>Цель: ≤ {drill.targets_seconds.rto} с</small>}
+                            </td>
+                            <td className="mono">
+                              {drill.measurements_seconds.restore_execution !== null ? `${drill.measurements_seconds.restore_execution} с` : "—"}
+                            </td>
+                            <td className="mono">
+                              {drill.measurements_seconds.observed_rpo !== null ? `${drill.measurements_seconds.observed_rpo} с` : "Не измерен"}
+                              {drill.targets_seconds.rpo !== null && <small>Цель: ≤ {drill.targets_seconds.rpo} с</small>}
+                            </td>
+                            <td style={{ color: assessmentColor, fontWeight: 600 }}>
+                              {assessmentLabel[drill.assessment]}
+                            </td>
+                            <td>{new Date(drill.generated_at).toLocaleString()}</td>
+                            <td className="actions">
+                              <button type="button" onClick={() => void downloadDrillJson(drill)}>Скачать JSON</button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
           </section>
         )}
 
@@ -2591,10 +3218,150 @@ export default function App() {
                     </div>
                     <div className="kpi-value">{telemetry.requests.api}</div>
                     <div className="kpi-sub">
-                      4xx: {telemetry.requests.error_4xx} · 5xx: {telemetry.requests.error_5xx} · Блокировок входа: {telemetry.requests.rate_limit_blocks}
+                      4xx: {telemetry.requests.error_4xx} · 5xx: {telemetry.requests.error_5xx} · Блокировок: {telemetry.requests.rate_limit_blocks}
+                      {typeof telemetry.requests.avg_duration_ms === "number" && (
+                        <> · Ср/p95: {telemetry.requests.avg_duration_ms}/{telemetry.requests.p95_duration_ms ?? 0} мс</>
+                      )}
                     </div>
                   </div>
                 </div>
+
+                {telemetry.alerts && telemetry.alerts.length > 0 && (
+                  <section className="panel">
+                    <div className="panel-heading">
+                      <div>
+                        <h2>Операционные алерты (Deployment Monitoring)</h2>
+                        <p>Сигналы по отказам, безопасности и готовности резервного копирования</p>
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                      {telemetry.alerts.map(alert => (
+                        <div
+                          key={alert.code}
+                          style={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                            gap: "12px",
+                            paddingBottom: "6px",
+                            borderBottom: "1px solid #f1f5f9",
+                            fontSize: "13px"
+                          }}
+                        >
+                          <span>
+                            <strong style={{ color: alert.level === "critical" ? "#dc2626" : alert.level === "warning" ? "#d97706" : "#0f172a" }}>
+                              {alert.level === "critical" ? "КРИТИЧНО" : alert.level === "warning" ? "ВНИМАНИЕ" : "ИНФО"}:
+                            </strong>{" "}
+                            {alert.message}
+                          </span>
+                          <span className="mono" style={{ fontSize: "11px", color: "#64748b" }}>{alert.code}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                )}
+
+                <section className="panel">
+                  <div className="panel-heading">
+                    <div>
+                      <h2>Готовность резервного копирования (Backup &amp; DR)</h2>
+                      <p>Последние операции резервного копирования, восстановления и учений RTO/RPO</p>
+                    </div>
+                    <button type="button" className="subtle" onClick={() => void openBackups()}>
+                      Перейти к резервным копиям →
+                    </button>
+                  </div>
+                  <div className="table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>ПОСЛЕДНИЙ БЭКАП</th>
+                          <th>ВОССТАНОВЛЕНИЕ</th>
+                          <th>СНИМКОВ В ХРАНИЛИЩЕ</th>
+                          <th>ПОСЛЕДНИЕ УЧЕНИЯ DR</th>
+                          <th>ОЦЕНКА УЧЕНИЙ</th>
+                          <th>ВСЕГО ОТЧЁТОВ</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr>
+                          <td className="mono">
+                            {telemetry.backup_readiness.last_backup_at
+                              ? new Date(telemetry.backup_readiness.last_backup_at).toLocaleString()
+                              : "Не выполнялся"}
+                          </td>
+                          <td className="mono">
+                            {telemetry.backup_readiness.last_restore_at
+                              ? new Date(telemetry.backup_readiness.last_restore_at).toLocaleString()
+                              : "Не выполнялось"}
+                          </td>
+                          <td className="mono">{telemetry.backup_readiness.local_snapshots_count ?? 0}</td>
+                          <td className="mono">
+                            {telemetry.backup_readiness.last_drill_at
+                              ? new Date(telemetry.backup_readiness.last_drill_at).toLocaleString()
+                              : "Не проводились"}
+                          </td>
+                          <td
+                            style={{
+                              fontWeight: 600,
+                              color:
+                                telemetry.backup_readiness.last_drill_assessment === "within_targets"
+                                  ? "#15803d"
+                                  : telemetry.backup_readiness.last_drill_assessment === "target_exceeded"
+                                  ? "#dc2626"
+                                  : "#64748b"
+                            }}
+                          >
+                            {telemetry.backup_readiness.last_drill_assessment === "within_targets"
+                              ? "В рамках целей"
+                              : telemetry.backup_readiness.last_drill_assessment === "target_exceeded"
+                              ? "Превышение цели"
+                              : telemetry.backup_readiness.last_drill_assessment === "not_assessed"
+                              ? "Не оценивалось"
+                              : "—"}
+                          </td>
+                          <td className="mono">{telemetry.backup_readiness.total_drills}</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+
+                {telemetry.readiness_checks && telemetry.readiness_checks.length > 0 && (
+                  <section className="panel">
+                    <div className="panel-heading">
+                      <div>
+                        <h2>Чек-лист готовности к эксплуатации (Operational Readiness)</h2>
+                        <p>Проверка ключевых параметров конфигурации, резервного копирования и наблюдаемости</p>
+                      </div>
+                    </div>
+                    <div className="table-wrap">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>ПАРАМЕТР</th>
+                            <th>СТАТУС</th>
+                            <th>ДЕТАЛИ ПРОВЕРКИ</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {telemetry.readiness_checks.map(check => (
+                            <tr key={check.id}>
+                              <td>
+                                <strong>{check.label}</strong>
+                                <small className="mono">{check.id}</small>
+                              </td>
+                              <td style={{ fontWeight: 700, color: check.status === "pass" ? "#15803d" : "#d97706" }}>
+                                {check.status === "pass" ? "PASS" : "ТРЕБУЕТ ВНИМАНИЯ"}
+                              </td>
+                              <td style={{ fontSize: "12px", color: "#334155" }}>{check.detail}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </section>
+                )}
 
                 <section className="panel">
                   <div className="panel-heading">
@@ -2629,11 +3396,32 @@ export default function App() {
                   <div className="panel-heading">
                     <div>
                       <h2>Структурированный журнал HTTP-запросов</h2>
-                      <p>Последние {telemetry.recent_logs.length} запросов к API</p>
+                      <p>Показано {filteredLogs.length} из {telemetry.recent_logs.length} последних запросов к API</p>
+                    </div>
+                    <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" }}>
+                      <input
+                        className="search"
+                        value={logPathSearch}
+                        onChange={e => setLogPathSearch(e.target.value)}
+                        placeholder="⌕  Фильтр по пути или методу..."
+                      />
+                      <select
+                        value={logStatusFilter}
+                        onChange={e => setLogStatusFilter(e.target.value as "all" | "2xx" | "4xx" | "5xx")}
+                        style={{ fontSize: "11px", padding: "6px" }}
+                      >
+                        <option value="all">Все коды</option>
+                        <option value="2xx">2xx Успех</option>
+                        <option value="4xx">4xx Ошибки клиента</option>
+                        <option value="5xx">5xx Ошибки сервера</option>
+                      </select>
+                      <button type="button" className="subtle" onClick={exportTelemetryLogsJson} disabled={filteredLogs.length === 0}>
+                        Экспорт логов (.json)
+                      </button>
                     </div>
                   </div>
-                  {telemetry.recent_logs.length === 0 ? (
-                    <div className="empty">Запросов пока не зафиксировано.</div>
+                  {filteredLogs.length === 0 ? (
+                    <div className="empty">Подходящих HTTP-запросов не найдено.</div>
                   ) : (
                     <div className="table-wrap">
                       <table>
@@ -2649,7 +3437,7 @@ export default function App() {
                           </tr>
                         </thead>
                         <tbody>
-                          {telemetry.recent_logs.map(log => (
+                          {filteredLogs.map(log => (
                             <tr key={log.id}>
                               <td className="mono">#{log.id}</td>
                               <td className="mono">{new Date(log.timestamp).toLocaleTimeString()}</td>

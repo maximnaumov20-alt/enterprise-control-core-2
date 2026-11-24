@@ -39,8 +39,8 @@
       "password_hash": "scrypt:031d51917220cd572191b1162d3d2ac0:5158945005ee89f540717b229e35dfe66eec3ee6413607b6432d42f978300d2fd6978cf14c2d9986e8a10756093e0d2b2e5692a1caaa081292161026d276fc0b",
       "role": "viewer",
       "is_active": true,
-      "token_version": 1,
-      "version": 1,
+      "token_version": 3,
+      "version": 3,
       "created_at": "2026-11-24T06:21:34.664Z"
     }
   ],
@@ -325,6 +325,283 @@
   ],
   "auditEvents": [
     {
+      "id": 42,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "auth.login",
+      "entity_type": "user",
+      "entity_id": "1",
+      "details": {
+        "email": "admin@example.com"
+      },
+      "created_at": "2026-11-24T07:24:54.632Z"
+    },
+    {
+      "id": 41,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "system.backup",
+      "entity_type": "system",
+      "entity_id": "1",
+      "details": {
+        "timestamp": "2026-11-24T07:10:02.073Z",
+        "sha256": "23128e367421666b1610b651803f6e84f9dccb5d781820b0937b01fcb6e10bab"
+      },
+      "created_at": "2026-11-24T07:10:02.073Z"
+    },
+    {
+      "id": 40,
+      "organization_id": 1,
+      "actor_user_id": 2,
+      "action": "auth.login",
+      "entity_type": "user",
+      "entity_id": "2",
+      "details": {
+        "email": "editor@example.com"
+      },
+      "created_at": "2026-11-24T07:10:02.066Z"
+    },
+    {
+      "id": 39,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "auth.login",
+      "entity_type": "user",
+      "entity_id": "1",
+      "details": {
+        "email": "admin@example.com"
+      },
+      "created_at": "2026-11-24T07:10:01.967Z"
+    },
+    {
+      "id": 38,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "auth.login",
+      "entity_type": "user",
+      "entity_id": "1",
+      "details": {
+        "email": "admin@example.com"
+      },
+      "created_at": "2026-11-24T07:08:30.517Z"
+    },
+    {
+      "id": 37,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "user.update",
+      "entity_type": "user",
+      "entity_id": "3",
+      "details": {
+        "changes": {
+          "is_active": {
+            "old": false,
+            "new": true
+          }
+        }
+      },
+      "created_at": "2026-11-24T07:06:44.182Z"
+    },
+    {
+      "id": 36,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "user.update",
+      "entity_type": "user",
+      "entity_id": "3",
+      "details": {
+        "changes": {
+          "is_active": {
+            "old": true,
+            "new": false
+          }
+        }
+      },
+      "created_at": "2026-11-24T07:06:44.179Z"
+    },
+    {
+      "id": 35,
+      "organization_id": 1,
+      "actor_user_id": 3,
+      "action": "auth.login",
+      "entity_type": "user",
+      "entity_id": "3",
+      "details": {
+        "email": "viewer@example.com"
+      },
+      "created_at": "2026-11-24T07:06:44.172Z"
+    },
+    {
+      "id": 34,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "asset.deleted",
+      "entity_type": "asset",
+      "entity_id": "7",
+      "details": {
+        "name": "=HYPERLINK(\"http://evil\")",
+        "asset_tag": "AST-TEMP-998"
+      },
+      "created_at": "2026-11-24T07:06:44.118Z"
+    },
+    {
+      "id": 33,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "asset.created",
+      "entity_type": "asset",
+      "entity_id": "7",
+      "details": {
+        "name": "=HYPERLINK(\"http://evil\")",
+        "asset_tag": "AST-TEMP-998",
+        "category": "Компьютер",
+        "status": "active"
+      },
+      "created_at": "2026-11-24T07:06:44.104Z"
+    },
+    {
+      "id": 32,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "auth.login",
+      "entity_type": "user",
+      "entity_id": "1",
+      "details": {
+        "email": "admin@example.com"
+      },
+      "created_at": "2026-11-24T07:06:43.444Z"
+    },
+    {
+      "id": 31,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "asset.deleted",
+      "entity_type": "asset",
+      "entity_id": "6",
+      "details": {
+        "name": "=HYPERLINK(\"http://evil\")",
+        "asset_tag": "AST-TEMP-999"
+      },
+      "created_at": "2026-11-24T07:06:32.000Z"
+    },
+    {
+      "id": 30,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "asset.created",
+      "entity_type": "asset",
+      "entity_id": "6",
+      "details": {
+        "name": "=HYPERLINK(\"http://evil\")",
+        "asset_tag": "AST-TEMP-999",
+        "category": "Компьютер",
+        "status": "active"
+      },
+      "created_at": "2026-11-24T07:06:31.986Z"
+    },
+    {
+      "id": 29,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "auth.login",
+      "entity_type": "user",
+      "entity_id": "1",
+      "details": {
+        "email": "admin@example.com"
+      },
+      "created_at": "2026-11-24T07:06:31.384Z"
+    },
+    {
+      "id": 28,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "auth.login",
+      "entity_type": "user",
+      "entity_id": "1",
+      "details": {
+        "email": "admin@example.com"
+      },
+      "created_at": "2026-11-24T07:02:51.188Z"
+    },
+    {
+      "id": 27,
+      "organization_id": 1,
+      "actor_user_id": 2,
+      "action": "auth.login",
+      "entity_type": "user",
+      "entity_id": "2",
+      "details": {
+        "email": "editor@example.com"
+      },
+      "created_at": "2026-11-24T06:54:28.486Z"
+    },
+    {
+      "id": 26,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "auth.login",
+      "entity_type": "user",
+      "entity_id": "1",
+      "details": {
+        "email": "admin@example.com"
+      },
+      "created_at": "2026-11-24T06:54:28.400Z"
+    },
+    {
+      "id": 25,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "system.recovery_drill",
+      "entity_type": "system",
+      "entity_id": "2",
+      "details": {
+        "backup_reference": "ecc-postgres-20261124T050000Z.dump.age",
+        "observed_rto": 1200,
+        "observed_rpo": null,
+        "assessment": "target_exceeded"
+      },
+      "created_at": "2026-11-24T06:50:14.204Z"
+    },
+    {
+      "id": 24,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "system.recovery_drill",
+      "entity_type": "system",
+      "entity_id": "1",
+      "details": {
+        "backup_reference": "ecc-postgres-20261124T060000Z.dump.age",
+        "observed_rto": 480,
+        "observed_rpo": 180,
+        "assessment": "within_targets"
+      },
+      "created_at": "2026-11-24T06:50:14.199Z"
+    },
+    {
+      "id": 23,
+      "organization_id": 1,
+      "actor_user_id": 2,
+      "action": "auth.login",
+      "entity_type": "user",
+      "entity_id": "2",
+      "details": {
+        "email": "editor@example.com"
+      },
+      "created_at": "2026-11-24T06:50:14.179Z"
+    },
+    {
+      "id": 22,
+      "organization_id": 1,
+      "actor_user_id": 1,
+      "action": "auth.login",
+      "entity_type": "user",
+      "entity_id": "1",
+      "details": {
+        "email": "admin@example.com"
+      },
+      "created_at": "2026-11-24T06:50:14.087Z"
+    },
+    {
       "id": 21,
       "organization_id": 1,
       "actor_user_id": 3,
@@ -595,9 +872,80 @@
     "user": 3,
     "department": 5,
     "employee": 5,
-    "asset": 5,
+    "asset": 7,
     "maintenance": 4,
     "software": 3,
-    "audit": 21
-  }
+    "audit": 42,
+    "recoveryDrill": 2
+  },
+  "recoveryDrills": [
+    {
+      "id": 2,
+      "organization_id": 1,
+      "created_by_user_id": 1,
+      "schema_version": 1,
+      "report_type": "ecc_recovery_drill",
+      "generated_at": "2026-11-24T06:50:14.203Z",
+      "backup_reference": "ecc-postgres-20261124T050000Z.dump.age",
+      "timestamps": {
+        "incident_at": "2026-11-24T06:10:00.000Z",
+        "restore_started_at": null,
+        "restore_completed_at": "2026-11-24T06:30:00.000Z",
+        "last_committed_at": null
+      },
+      "measurements_seconds": {
+        "observed_rto": 1200,
+        "restore_execution": null,
+        "observed_rpo": null
+      },
+      "targets_seconds": {
+        "rto": 900,
+        "rpo": null
+      },
+      "target_met": {
+        "rto": false,
+        "rpo": null
+      },
+      "assessment": "target_exceeded",
+      "measurement_notes": {
+        "rto": "Incident declaration to verified restore completion.",
+        "rpo": "Incident time minus last known committed transaction time; requires a trustworthy transaction timestamp.",
+        "missing_rpo": "RPO was not measured. Backup age alone is not proof of data loss."
+      }
+    },
+    {
+      "id": 1,
+      "organization_id": 1,
+      "created_by_user_id": 1,
+      "schema_version": 1,
+      "report_type": "ecc_recovery_drill",
+      "generated_at": "2026-11-24T06:50:14.199Z",
+      "backup_reference": "ecc-postgres-20261124T060000Z.dump.age",
+      "timestamps": {
+        "incident_at": "2026-11-24T06:10:00.000Z",
+        "restore_started_at": "2026-11-24T06:12:00.000Z",
+        "restore_completed_at": "2026-11-24T06:18:00.000Z",
+        "last_committed_at": "2026-11-24T06:07:00.000Z"
+      },
+      "measurements_seconds": {
+        "observed_rto": 480,
+        "restore_execution": 360,
+        "observed_rpo": 180
+      },
+      "targets_seconds": {
+        "rto": 900,
+        "rpo": 300
+      },
+      "target_met": {
+        "rto": true,
+        "rpo": true
+      },
+      "assessment": "within_targets",
+      "measurement_notes": {
+        "rto": "Incident declaration to verified restore completion.",
+        "rpo": "Incident time minus last known committed transaction time; requires a trustworthy transaction timestamp.",
+        "missing_rpo": null
+      }
+    }
+  ]
 }

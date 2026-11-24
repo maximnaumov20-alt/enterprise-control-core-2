@@ -8,12 +8,44 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PORT = 3000;
+const PORT = Number(process.env.ECC_PORT || '3000');
 const app = express();
+app.disable('x-powered-by');
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+const ALLOWED_CORS_ORIGINS = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map(o => o.trim())
+  .filter(Boolean);
+if (ALLOWED_CORS_ORIGINS.includes('*')) {
+  throw new Error('CORS_ORIGINS must not contain wildcard "*" when credentialed/authenticated requests are used.');
+}
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (origin && ALLOWED_CORS_ORIGINS.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    if (req.method === 'OPTIONS') {
+      return res.status(204).end();
+    }
+  }
+  next();
+});
+
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+app.use((err: any, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (err && err.type === 'entity.parse.failed') {
+    return res.status(400).json({ detail: 'Неверный формат JSON в теле запроса' });
+  }
+  if (err && err.type === 'entity.too.large') {
+    return res.status(413).json({ detail: 'Размер тела запроса превышает допустимый лимит (1 МБ)' });
+  }
+  next(err);
+});
 
 // --- SECURITY HEADERS & STRUCTURED TELEMETRY (Phase 2) ---
 interface StructuredLogEntry {
@@ -36,13 +68,15 @@ const telemetryCounters = {
   logSeq: 0
 };
 const structuredLogs: StructuredLogEntry[] = [];
+const STRUCTURED_LOGS_STDOUT = process.env.ECC_STRUCTURED_LOGS === 'true';
 
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-  if (req.path.startsWith('/api/')) {
+  if (req.path.startsWith('/api/') || req.path === '/health') {
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
     res.setHeader('Cache-Control', 'no-store');
   }
 
@@ -71,6 +105,9 @@ app.use((req, res, next) => {
       structuredLogs.unshift(entry);
       if (structuredLogs.length > 150) {
         structuredLogs.length = 150;
+      }
+      if (STRUCTURED_LOGS_STDOUT) {
+        console.log(JSON.stringify({ event: 'http_request', ...entry }));
       }
     }
   });
@@ -191,6 +228,43 @@ interface AuditEvent {
   created_at: string;
 }
 
+export type RecoveryDrillAssessment = 'within_targets' | 'target_exceeded' | 'not_assessed';
+
+interface RecoveryDrillReport {
+  id: number;
+  organization_id: number;
+  created_by_user_id: number | null;
+  schema_version: 1;
+  report_type: 'ecc_recovery_drill';
+  generated_at: string;
+  backup_reference: string;
+  timestamps: {
+    incident_at: string;
+    restore_started_at: string | null;
+    restore_completed_at: string;
+    last_committed_at: string | null;
+  };
+  measurements_seconds: {
+    observed_rto: number;
+    restore_execution: number | null;
+    observed_rpo: number | null;
+  };
+  targets_seconds: {
+    rto: number | null;
+    rpo: number | null;
+  };
+  target_met: {
+    rto: boolean | null;
+    rpo: boolean | null;
+  };
+  assessment: RecoveryDrillAssessment;
+  measurement_notes: {
+    rto: string;
+    rpo: string;
+    missing_rpo: string | null;
+  };
+}
+
 interface EccDatabase {
   organizations: Organization[];
   users: User[];
@@ -200,6 +274,7 @@ interface EccDatabase {
   maintenanceRequests: MaintenanceRequest[];
   softwareLicenses: SoftwareLicense[];
   auditEvents: AuditEvent[];
+  recoveryDrills?: RecoveryDrillReport[];
   counters: {
     user: number;
     department: number;
@@ -208,12 +283,15 @@ interface EccDatabase {
     maintenance: number;
     software: number;
     audit: number;
+    recoveryDrill?: number;
   };
 }
 
 // --- PERSISTENCE ---
-const DATA_DIR = path.resolve(__dirname, 'data');
+const DATA_DIR = path.resolve(process.env.ECC_DATA_DIR || path.resolve(__dirname, 'data'));
+const BACKUPS_DIR = path.resolve(DATA_DIR, 'backups');
 const DB_FILE = path.resolve(DATA_DIR, 'ecc_store.json');
+const BACKUP_RETENTION_COUNT = Math.max(1, Math.min(100, Number(process.env.ECC_BACKUP_RETENTION_COUNT || '10') || 10));
 
 function hashPassword(password: string): string {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -557,6 +635,7 @@ function createInitialDatabase(): EccDatabase {
         created_at: now
       }
     ],
+    recoveryDrills: [],
     counters: {
       user: 3,
       department: 5,
@@ -564,7 +643,8 @@ function createInitialDatabase(): EccDatabase {
       asset: 5,
       maintenance: 2,
       software: 3,
-      audit: 3
+      audit: 3,
+      recoveryDrill: 0
     }
   };
 }
@@ -574,6 +654,8 @@ try {
   if (fs.existsSync(DB_FILE)) {
     const raw = fs.readFileSync(DB_FILE, 'utf-8');
     db = JSON.parse(raw);
+    if (!Array.isArray(db.recoveryDrills)) db.recoveryDrills = [];
+    if (typeof db.counters.recoveryDrill !== 'number') db.counters.recoveryDrill = db.recoveryDrills.length;
   } else {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -622,7 +704,28 @@ function logAudit(
 }
 
 // --- AUTH & TOKENS ---
-const SECRET_KEY = process.env.ECC_SECRET_KEY || 'default-super-secret-key-at-least-32-bytes-long-for-ecc-production';
+const configuredSecret = process.env.ECC_SECRET_KEY;
+if (configuredSecret) {
+  if (configuredSecret.includes('REPLACE_WITH')) {
+    throw new Error('ECC_SECRET_KEY is still a placeholder; configure a unique random secret.');
+  }
+  if (Buffer.byteLength(configuredSecret, 'utf-8') < 32) {
+    throw new Error('ECC_SECRET_KEY must contain at least 32 bytes.');
+  }
+}
+const SECRET_KEY = configuredSecret || 'default-super-secret-key-at-least-32-bytes-long-for-ecc-production';
+
+const ACCESS_TOKEN_MINUTES = Number(process.env.ACCESS_TOKEN_MINUTES || '20');
+if (!Number.isInteger(ACCESS_TOKEN_MINUTES) || ACCESS_TOKEN_MINUTES < 5 || ACCESS_TOKEN_MINUTES > 60) {
+  throw new Error('ACCESS_TOKEN_MINUTES must be an integer between 5 and 60.');
+}
+const ACCESS_TOKEN_SECONDS = ACCESS_TOKEN_MINUTES * 60;
+
+const AUTH_RATE_LIMIT_MAX = Number(process.env.AUTH_RATE_LIMIT_MAX || '10');
+const AUTH_RATE_LIMIT_WINDOW_SECONDS = Number(process.env.AUTH_RATE_LIMIT_WINDOW_SECONDS || '60');
+if (!Number.isInteger(AUTH_RATE_LIMIT_MAX) || AUTH_RATE_LIMIT_MAX < 1 || !Number.isInteger(AUTH_RATE_LIMIT_WINDOW_SECONDS) || AUTH_RATE_LIMIT_WINDOW_SECONDS < 1) {
+  throw new Error('Authentication rate-limit settings must be positive integers.');
+}
 
 interface TokenPayload {
   userId: number;
@@ -631,7 +734,7 @@ interface TokenPayload {
   exp: number;
 }
 
-function signToken(payload: Omit<TokenPayload, 'exp'>, expiresInSeconds = 7200): string {
+function signToken(payload: Omit<TokenPayload, 'exp'>, expiresInSeconds = ACCESS_TOKEN_SECONDS): string {
   const fullPayload: TokenPayload = {
     ...payload,
     exp: Math.floor(Date.now() / 1000) + expiresInSeconds
@@ -658,15 +761,18 @@ function verifyToken(token: string): TokenPayload | null {
 function authenticate(req: express.Request, res: express.Response, next: express.NextFunction) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    res.setHeader('WWW-Authenticate', 'Bearer');
     return res.status(401).json({ detail: 'Необходима авторизация' });
   }
   const token = authHeader.slice(7).trim();
   const payload = verifyToken(token);
   if (!payload) {
+    res.setHeader('WWW-Authenticate', 'Bearer');
     return res.status(401).json({ detail: 'Недействительный или истекший токен доступа' });
   }
   const user = db.users.find(u => u.id === payload.userId && u.organization_id === payload.organizationId);
   if (!user || !user.is_active || user.token_version !== payload.tokenVersion) {
+    res.setHeader('WWW-Authenticate', 'Bearer');
     return res.status(401).json({ detail: 'Сессия недействительна. Войдите снова.' });
   }
   (req as any).user = user;
@@ -675,74 +781,68 @@ function authenticate(req: express.Request, res: express.Response, next: express
 
 // --- API ENDPOINTS ---
 
-// Login Rate Limiter (10 attempts per minute per IP/Email)
+// Login Rate Limiter (fixed window per client IP, ignoring untrusted X-Forwarded-For)
 interface RateLimitBucket {
   attempts: number;
   resetAt: number;
 }
 const loginRateLimitBuckets = new Map<string, RateLimitBucket>();
 
-function recordFailedLogin(key: string) {
+function checkLoginRateLimit(key: string): number | null {
   const now = Date.now();
-  const bucket = loginRateLimitBuckets.get(key);
-  if (!bucket || now > bucket.resetAt) {
-    loginRateLimitBuckets.set(key, { attempts: 1, resetAt: now + 60000 });
-  } else {
-    bucket.attempts += 1;
+  let bucket = loginRateLimitBuckets.get(key);
+  if (!bucket || now >= bucket.resetAt) {
+    bucket = { attempts: 0, resetAt: now + AUTH_RATE_LIMIT_WINDOW_SECONDS * 1000 };
   }
-}
-
-function isLoginRateLimited(key: string): boolean {
-  const now = Date.now();
-  const bucket = loginRateLimitBuckets.get(key);
-  if (!bucket) return false;
-  if (now > bucket.resetAt) {
-    loginRateLimitBuckets.delete(key);
-    return false;
+  bucket.attempts += 1;
+  loginRateLimitBuckets.set(key, bucket);
+  if (bucket.attempts > AUTH_RATE_LIMIT_MAX) {
+    return Math.max(Math.ceil((bucket.resetAt - now) / 1000), 1);
   }
-  return bucket.attempts >= 10;
+  return null;
 }
 
 // Healthcheck
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok' });
+  res.json({ status: 'ok', service: 'enterprise-control-center-api' });
 });
 
 // Auth Login
 app.post('/api/v1/auth/token', (req, res) => {
-  const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
+  const realIpHeader = req.headers['x-real-ip'];
+  const clientIp = (typeof realIpHeader === 'string' && realIpHeader.trim())
+    ? realIpHeader.trim()
+    : (req.socket.remoteAddress || 'unknown');
   const email = (req.body.username || req.body.email || '').toString().trim().toLowerCase();
   const password = (req.body.password || '').toString();
 
-  const rateLimitKey = `${clientIp}:${email}`;
-  if (isLoginRateLimited(rateLimitKey)) {
-    return res.status(429).json({ detail: 'Превышен лимит попыток входа (10 попыток). Пожалуйста, подождите 60 секунд.' });
+  const rateLimitKey = `ecc:auth:login:${clientIp}`;
+  const retryAfter = checkLoginRateLimit(rateLimitKey);
+  if (retryAfter !== null) {
+    res.setHeader('Retry-After', String(retryAfter));
+    return res.status(429).json({
+      detail: `Превышен лимит попыток входа (${AUTH_RATE_LIMIT_MAX} попыток). Повторите через ${retryAfter} сек.`
+    });
   }
 
   const user = db.users.find(u => u.email.toLowerCase() === email);
-  if (!user || !verifyPassword(password, user.password_hash)) {
-    recordFailedLogin(rateLimitKey);
-    return res.status(400).json({ detail: 'Неверный адрес электронной почты или пароль' });
+  if (!user || !user.is_active || !verifyPassword(password, user.password_hash)) {
+    res.setHeader('WWW-Authenticate', 'Bearer');
+    return res.status(401).json({ detail: 'Неверный адрес электронной почты или пароль' });
   }
-  if (!user.is_active) {
-    return res.status(400).json({ detail: 'Учётная запись деактивирована администратором' });
-  }
-
-  // Clear failed rate limit bucket on successful login
-  loginRateLimitBuckets.delete(rateLimitKey);
 
   const token = signToken({
     userId: user.id,
     organizationId: user.organization_id,
     tokenVersion: user.token_version
-  }, 7200);
+  }, ACCESS_TOKEN_SECONDS);
 
   logAudit(user.organization_id, user.id, 'auth.login', 'user', user.id, { email: user.email });
 
   res.json({
     access_token: token,
     token_type: 'bearer',
-    expires_in: 7200
+    expires_in: ACCESS_TOKEN_SECONDS
   });
 });
 
@@ -759,20 +859,21 @@ app.get('/api/v1/auth/me', authenticate, (req, res) => {
     is_active: user.is_active,
     organization_id: user.organization_id,
     organization_name: org ? org.name : 'Default Organization',
-    created_at: user.created_at
+    created_at: user.created_at,
+    version: user.version
   });
 });
 
 // Change Password
 app.post('/api/v1/auth/change-password', authenticate, (req, res) => {
   const user = (req as any).user as User;
-  const { current_password, new_password } = req.body;
+  const { current_password, new_password } = req.body || {};
 
-  if (!verifyPassword(current_password, user.password_hash)) {
+  if (typeof current_password !== 'string' || !verifyPassword(current_password, user.password_hash)) {
     return res.status(400).json({ detail: 'Неверный текущий пароль' });
   }
-  if (!new_password || new_password.length < 12) {
-    return res.status(400).json({ detail: 'Новый пароль должен содержать не менее 12 символов' });
+  if (typeof new_password !== 'string' || new_password.length < 12 || new_password.length > 128) {
+    return res.status(422).json({ detail: 'Новый пароль должен содержать от 12 до 128 символов' });
   }
 
   user.password_hash = hashPassword(new_password);
@@ -780,7 +881,7 @@ app.post('/api/v1/auth/change-password', authenticate, (req, res) => {
   saveDb();
 
   logAudit(user.organization_id, user.id, 'auth.change_password', 'user', user.id);
-  res.json({ status: 'ok' });
+  res.json({ status: 'password_updated' });
 });
 
 // Users Management
@@ -824,13 +925,23 @@ app.post('/api/v1/users', authenticate, (req, res) => {
   if (user.role !== 'admin') {
     return res.status(403).json({ detail: 'Только администратор может создавать пользователей' });
   }
-  const { email, full_name, password, role } = req.body;
-  if (!email || !full_name || !password || !role) {
-    return res.status(400).json({ detail: 'Заполните все обязательные поля' });
+  const { email, full_name, password, role } = req.body || {};
+  const cleanEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+  const cleanName = typeof full_name === 'string' ? full_name.trim() : '';
+  if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+    return res.status(422).json({ detail: 'Укажите корректный email' });
   }
-  const cleanEmail = email.trim().toLowerCase();
-  if (db.users.some(u => u.organization_id === user.organization_id && u.email.toLowerCase() === cleanEmail)) {
-    return res.status(400).json({ detail: 'Пользователь с таким email уже существует' });
+  if (!cleanName) {
+    return res.status(422).json({ detail: 'ФИО пользователя обязательно' });
+  }
+  if (typeof password !== 'string' || password.length < 12 || password.length > 128) {
+    return res.status(422).json({ detail: 'Пароль должен содержать от 12 до 128 символов' });
+  }
+  if (!['admin', 'editor', 'viewer'].includes(role)) {
+    return res.status(422).json({ detail: 'Недопустимая роль пользователя' });
+  }
+  if (db.users.some(u => u.email.toLowerCase() === cleanEmail)) {
+    return res.status(409).json({ detail: 'Пользователь с таким email уже существует' });
   }
 
   db.counters.user += 1;
@@ -838,7 +949,7 @@ app.post('/api/v1/users', authenticate, (req, res) => {
     id: db.counters.user,
     organization_id: user.organization_id,
     email: cleanEmail,
-    full_name: full_name.trim(),
+    full_name: cleanName,
     password_hash: hashPassword(password),
     role,
     is_active: true,
@@ -876,12 +987,22 @@ app.patch('/api/v1/users/:id', authenticate, (req, res) => {
   if (!target) {
     return res.status(404).json({ detail: 'Пользователь не найден' });
   }
-  const { expected_version, full_name, role, is_active } = req.body;
+  const { expected_version, full_name, role, is_active } = req.body || {};
   if (typeof expected_version !== 'number') {
     return res.status(422).json({ detail: 'expected_version обязателен' });
   }
   if (target.version !== expected_version) {
     return res.status(409).json({ detail: 'Конфликт версий записи. Обновите данные.' });
+  }
+
+  if (full_name !== undefined && (typeof full_name !== 'string' || !full_name.trim())) {
+    return res.status(422).json({ detail: 'full_name не может быть пустым' });
+  }
+  if (role !== undefined && !['admin', 'editor', 'viewer'].includes(role)) {
+    return res.status(422).json({ detail: 'Недопустимая роль пользователя' });
+  }
+  if (is_active !== undefined && typeof is_active !== 'boolean') {
+    return res.status(422).json({ detail: 'is_active должен быть булевым значением' });
   }
 
   if (target.id === user.id) {
@@ -905,9 +1026,8 @@ app.patch('/api/v1/users/:id', authenticate, (req, res) => {
   if (is_active !== undefined && is_active !== target.is_active) {
     changes.is_active = { old: target.is_active, new: is_active };
     target.is_active = is_active;
-    if (!is_active) {
-      target.token_version += 1;
-    }
+    // Invalidate previously issued tokens on both disable and re-enable (parity with test_disabling_and_reenabling_user_revokes_old_access_token)
+    target.token_version += 1;
   }
 
   if (Object.keys(changes).length === 0) {
@@ -1200,10 +1320,22 @@ app.delete('/api/v1/employees/:id', authenticate, (req, res) => {
 });
 
 // Assets Management
+function csvSpreadsheetSafe(val: unknown): string {
+  if (val === null || val === undefined) return '""';
+  let s = String(val);
+  if (/^[=+\-@]/.test(s.replace(/^[ \t\r\n]+/, '')) || /^[\t\r\n]/.test(s)) {
+    s = `'${s}`;
+  }
+  return `"${s.replace(/"/g, '""')}"`;
+}
+
 app.get('/api/v1/assets', authenticate, (req, res) => {
   const user = (req as any).user as User;
   const search = ((req.query.search as string) || '').trim().toLowerCase();
-  const limit = parseInt((req.query.limit as string) || '200', 10);
+  const parsedOffset = parseInt((req.query.offset as string) || '0', 10);
+  const offset = Number.isNaN(parsedOffset) || parsedOffset < 0 ? 0 : parsedOffset;
+  const parsedLimit = parseInt((req.query.limit as string) || '200', 10);
+  const limit = Number.isNaN(parsedLimit) ? 200 : Math.min(200, Math.max(1, parsedLimit));
 
   let list = db.assets.filter(a => a.organization_id === user.organization_id);
   if (search) {
@@ -1216,7 +1348,7 @@ app.get('/api/v1/assets', authenticate, (req, res) => {
       a.category.toLowerCase().includes(search)
     );
   }
-  res.json(list.slice(0, limit));
+  res.json(list.slice(offset, offset + limit));
 });
 
 app.post('/api/v1/assets', authenticate, (req, res) => {
@@ -1224,14 +1356,20 @@ app.post('/api/v1/assets', authenticate, (req, res) => {
   if (user.role === 'viewer') {
     return res.status(403).json({ detail: 'Недостаточно прав' });
   }
-  const { name, asset_tag, category, manufacturer, model, serial_number, assigned_to, status } = req.body;
-  if (!name || !asset_tag || !category) {
-    return res.status(400).json({ detail: 'Название, инвентарный номер и категория обязательны' });
+  const { name, asset_tag, category, manufacturer, model, serial_number, assigned_to, status } = req.body || {};
+  const cleanName = typeof name === 'string' ? name.trim() : '';
+  const cleanTag = typeof asset_tag === 'string' ? asset_tag.trim() : '';
+  const cleanCategory = typeof category === 'string' ? category.trim() : '';
+  if (!cleanName || !cleanTag || !cleanCategory) {
+    return res.status(422).json({ detail: 'Название, инвентарный номер и категория обязательны' });
+  }
+  const nextStatus: AssetStatus = status || 'active';
+  if (!['active', 'in_repair', 'retired'].includes(nextStatus)) {
+    return res.status(422).json({ detail: 'Недопустимый статус оборудования' });
   }
 
-  const cleanTag = asset_tag.trim();
   if (db.assets.some(a => a.organization_id === user.organization_id && a.asset_tag.toLowerCase() === cleanTag.toLowerCase())) {
-    return res.status(400).json({ detail: 'Оборудование с таким инвентарным номером уже существует' });
+    return res.status(409).json({ detail: 'Оборудование с таким инвентарным номером уже существует' });
   }
 
   db.counters.asset += 1;
@@ -1239,14 +1377,14 @@ app.post('/api/v1/assets', authenticate, (req, res) => {
   const newAsset: Asset = {
     id: db.counters.asset,
     organization_id: user.organization_id,
-    name: name.trim(),
+    name: cleanName,
     asset_tag: cleanTag,
-    category: category.trim(),
-    manufacturer: manufacturer ? manufacturer.trim() : null,
-    model: model ? model.trim() : null,
-    serial_number: serial_number ? serial_number.trim() : null,
-    assigned_to: assigned_to ? assigned_to.trim() : null,
-    status: status || 'active',
+    category: cleanCategory,
+    manufacturer: manufacturer ? String(manufacturer).trim() : null,
+    model: model ? String(model).trim() : null,
+    serial_number: serial_number ? String(serial_number).trim() : null,
+    assigned_to: assigned_to ? String(assigned_to).trim() : null,
+    status: nextStatus,
     created_at: now,
     updated_at: now,
     version: 1
@@ -1256,7 +1394,9 @@ app.post('/api/v1/assets', authenticate, (req, res) => {
 
   logAudit(user.organization_id, user.id, 'asset.created', 'asset', newAsset.id, {
     name: newAsset.name,
-    asset_tag: newAsset.asset_tag
+    asset_tag: newAsset.asset_tag,
+    category: newAsset.category,
+    status: newAsset.status
   });
 
   res.status(201).json(newAsset);
@@ -1266,25 +1406,16 @@ app.get('/api/v1/assets/export', authenticate, (req, res) => {
   const user = (req as any).user as User;
   const list = db.assets.filter(a => a.organization_id === user.organization_id);
 
-  function csvEscape(val: unknown): string {
-    if (val === null || val === undefined) return '""';
-    let s = String(val);
-    if (/^[=+\-@\t\r]/.test(s)) {
-      s = `'${s}`;
-    }
-    return `"${s.replace(/"/g, '""')}"`;
-  }
-
   const header = ['name', 'asset_tag', 'category', 'manufacturer', 'model', 'serial_number', 'assigned_to', 'status'];
   const rows = list.map(a => [
-    csvEscape(a.name),
-    csvEscape(a.asset_tag),
-    csvEscape(a.category),
-    csvEscape(a.manufacturer || ''),
-    csvEscape(a.model || ''),
-    csvEscape(a.serial_number || ''),
-    csvEscape(a.assigned_to || ''),
-    csvEscape(a.status)
+    csvSpreadsheetSafe(a.name),
+    csvSpreadsheetSafe(a.asset_tag),
+    csvSpreadsheetSafe(a.category),
+    csvSpreadsheetSafe(a.manufacturer || ''),
+    csvSpreadsheetSafe(a.model || ''),
+    csvSpreadsheetSafe(a.serial_number || ''),
+    csvSpreadsheetSafe(a.assigned_to || ''),
+    csvSpreadsheetSafe(a.status)
   ].join(','));
 
   const csv = [header.join(','), ...rows].join('\n');
@@ -1292,6 +1423,9 @@ app.get('/api/v1/assets/export', authenticate, (req, res) => {
   res.setHeader('Content-Disposition', 'attachment; filename="assets.csv"');
   res.send(csv);
 });
+
+const MAX_ASSET_IMPORT_BYTES = 2 * 1024 * 1024;
+const MAX_ASSET_IMPORT_ROWS = 5000;
 
 app.post('/api/v1/assets/import', authenticate, upload.single('file'), (req, res) => {
   const user = (req as any).user as User;
@@ -1302,11 +1436,17 @@ app.post('/api/v1/assets/import', authenticate, upload.single('file'), (req, res
   if (!req.file || !req.file.buffer) {
     return res.status(400).json({ detail: 'Файл не загружен' });
   }
+  if (req.file.buffer.length > MAX_ASSET_IMPORT_BYTES) {
+    return res.status(422).json({ detail: 'Размер CSV-файла превышает 2 МБ' });
+  }
 
-  const content = req.file.buffer.toString('utf-8');
+  const content = req.file.buffer.toString('utf-8').replace(/^\uFEFF/, '');
   const lines = content.split(/\r?\n/).filter(line => line.trim().length > 0);
   if (lines.length < 2) {
     return res.json({ created: 0, skipped: 0, errors: [] });
+  }
+  if (lines.length - 1 > MAX_ASSET_IMPORT_ROWS) {
+    return res.status(422).json({ detail: `CSV не может содержать более ${MAX_ASSET_IMPORT_ROWS} строк` });
   }
 
   const headers = lines[0].split(',').map(h => h.replace(/^["']|["']$/g, '').trim());
@@ -1316,7 +1456,6 @@ app.post('/api/v1/assets/import', authenticate, upload.single('file'), (req, res
 
   for (let i = 1; i < lines.length; i++) {
     const rawLine = lines[i];
-    // Simple CSV parser supporting quotes
     const cells: string[] = [];
     let insideQuotes = false;
     let currentCell = '';
@@ -1342,12 +1481,17 @@ app.post('/api/v1/assets/import', authenticate, upload.single('file'), (req, res
       record[h] = val;
     });
 
-    const name = record.name;
-    const asset_tag = record.asset_tag;
-    const category = record.category || 'Компьютер';
+    const name = (record.name || '').trim();
+    const asset_tag = (record.asset_tag || '').trim();
+    const category = (record.category || 'Компьютер').trim();
+    const rowStatus = (record.status || 'active').trim() as AssetStatus;
 
     if (!name || !asset_tag) {
       errors.push({ row: i + 1, error: 'Отсутствует name или asset_tag' });
+      continue;
+    }
+    if (!['active', 'in_repair', 'retired'].includes(rowStatus)) {
+      errors.push({ row: i + 1, error: `Недопустимый статус: ${rowStatus}` });
       continue;
     }
 
@@ -1364,11 +1508,11 @@ app.post('/api/v1/assets/import', authenticate, upload.single('file'), (req, res
       name,
       asset_tag,
       category,
-      manufacturer: record.manufacturer || null,
-      model: record.model || null,
-      serial_number: record.serial_number || null,
-      assigned_to: record.assigned_to || null,
-      status: (record.status as AssetStatus) || 'active',
+      manufacturer: record.manufacturer?.trim() || null,
+      model: record.model?.trim() || null,
+      serial_number: record.serial_number?.trim() || null,
+      assigned_to: record.assigned_to?.trim() || null,
+      status: rowStatus,
       created_at: now,
       updated_at: now,
       version: 1
@@ -1382,6 +1526,11 @@ app.post('/api/v1/assets/import', authenticate, upload.single('file'), (req, res
     });
   }
 
+  logAudit(user.organization_id, user.id, 'asset.import', 'asset', 'batch', {
+    created,
+    skipped,
+    errors: errors.length
+  });
   saveDb();
   res.json({ created, skipped, errors });
 });
@@ -1392,47 +1541,71 @@ app.patch('/api/v1/assets/bulk', authenticate, (req, res) => {
     return res.status(403).json({ detail: 'Недостаточно прав' });
   }
 
-  const { asset_ids, versions, status, assigned_to } = req.body;
-  if (!Array.isArray(asset_ids) || asset_ids.length === 0) {
-    return res.status(400).json({ detail: 'Выберите хотя бы одно оборудование' });
+  const { asset_ids, versions, status, assigned_to } = req.body || {};
+  if (!Array.isArray(asset_ids) || asset_ids.length === 0 || asset_ids.length > 100) {
+    return res.status(422).json({ detail: 'Укажите от 1 до 100 уникальных идентификаторов активов' });
+  }
+  const uniqueIds = Array.from(new Set(asset_ids));
+  if (uniqueIds.length !== asset_ids.length || uniqueIds.some(id => !Number.isInteger(id) || id <= 0)) {
+    return res.status(422).json({ detail: 'asset_ids должен содержать уникальные положительные целые числа' });
+  }
+  if (!versions || typeof versions !== 'object' || Array.isArray(versions)) {
+    return res.status(422).json({ detail: 'Поле versions обязательно' });
+  }
+  if (status === undefined && assigned_to === undefined) {
+    return res.status(422).json({ detail: 'Укажите status или assigned_to для массового обновления' });
+  }
+  if (status !== undefined && !['active', 'in_repair', 'retired'].includes(status)) {
+    return res.status(422).json({ detail: 'Недопустимый статус оборудования' });
   }
 
-  const updatedAssets: Asset[] = [];
-  let updatedCount = 0;
-
-  for (const id of asset_ids) {
+  const targetAssets: Asset[] = [];
+  for (const id of uniqueIds) {
     const asset = db.assets.find(a => a.id === id && a.organization_id === user.organization_id);
-    if (!asset) continue;
-
-    if (versions && versions[id] !== undefined && versions[id] !== asset.version) {
-      continue; // Skip or report conflict
+    if (!asset) {
+      return res.status(404).json({ detail: 'Один или несколько активов не найдены в организации' });
     }
+    targetAssets.push(asset);
+  }
 
+  for (const asset of targetAssets) {
+    const expected = versions[asset.id] ?? versions[String(asset.id)];
+    if (typeof expected !== 'number' || expected !== asset.version) {
+      return res.status(409).json({ detail: 'Один или несколько активов были изменены. Обновите список и повторите.' });
+    }
+  }
+
+  const nextAssignedTo = assigned_to === undefined
+    ? undefined
+    : (assigned_to === null ? null : (String(assigned_to).trim() || null));
+
+  let updatedCount = 0;
+  for (const asset of targetAssets) {
     const changes: Record<string, { old: unknown; new: unknown }> = {};
-    if (status && status !== asset.status) {
+    if (status !== undefined && status !== asset.status) {
       changes.status = { old: asset.status, new: status };
       asset.status = status;
     }
-    if (assigned_to !== undefined && assigned_to !== asset.assigned_to) {
-      changes.assigned_to = { old: asset.assigned_to, new: assigned_to };
-      asset.assigned_to = assigned_to;
+    if (nextAssignedTo !== undefined && nextAssignedTo !== asset.assigned_to) {
+      changes.assigned_to = { old: asset.assigned_to, new: nextAssignedTo };
+      asset.assigned_to = nextAssignedTo;
     }
 
     if (Object.keys(changes).length > 0) {
       asset.version += 1;
       asset.updated_at = new Date().toISOString();
-      updatedAssets.push(asset);
       updatedCount += 1;
-
-      logAudit(user.organization_id, user.id, 'asset.updated', 'asset', asset.id, { changes });
+      logAudit(user.organization_id, user.id, 'asset.updated', 'asset', asset.id, { changes, source: 'bulk' });
     }
   }
 
-  saveDb();
+  if (updatedCount > 0) {
+    saveDb();
+  }
   res.json({
-    selected: asset_ids.length,
+    selected: targetAssets.length,
     updated: updatedCount,
-    assets: updatedAssets
+    assets: targetAssets
   });
 });
 
@@ -1604,8 +1777,8 @@ app.post('/api/v1/maintenance-requests', authenticate, (req, res) => {
   saveDb();
 
   logAudit(user.organization_id, user.id, 'maintenance.created', 'maintenance_request', newReq.id, {
-    title: newReq.title,
-    asset_id: newReq.asset_id
+    asset_id: newReq.asset_id,
+    priority: newReq.priority
   });
 
   res.status(201).json(newReq);
@@ -1700,7 +1873,15 @@ app.patch('/api/v1/maintenance-requests/:id', authenticate, (req, res) => {
 // Software Licenses Management
 app.get('/api/v1/software-licenses', authenticate, (req, res) => {
   const user = (req as any).user as User;
-  const list = db.softwareLicenses.filter(s => s.organization_id === user.organization_id);
+  const search = ((req.query.search as string) || '').trim().toLowerCase();
+  let list = db.softwareLicenses.filter(s => s.organization_id === user.organization_id);
+  if (search) {
+    list = list.filter(s =>
+      s.name.toLowerCase().includes(search) ||
+      (s.publisher && s.publisher.toLowerCase().includes(search)) ||
+      (s.license_reference && s.license_reference.toLowerCase().includes(search))
+    );
+  }
   res.json(list);
 });
 
@@ -1746,6 +1927,7 @@ app.post('/api/v1/software-licenses', authenticate, (req, res) => {
 
   logAudit(user.organization_id, user.id, 'software.created', 'software_license', newLic.id, {
     name: newLic.name,
+    license_type: newLic.license_type,
     seats_total: newLic.seats_total
   });
 
@@ -1949,7 +2131,92 @@ app.get('/api/v1/system/stats', authenticate, (req, res) => {
   });
 });
 
-// System Backup & Restore
+// System Backup, Integrity Verification & Restore (Phase 2)
+function computeBackupDigest(payload: Record<string, unknown>): string {
+  const canonical = {
+    schema_version: payload.schema_version ?? '1.0',
+    exported_at: payload.exported_at ?? null,
+    organization: payload.organization ?? null,
+    departments: Array.isArray(payload.departments) ? payload.departments : [],
+    employees: Array.isArray(payload.employees) ? payload.employees : [],
+    assets: Array.isArray(payload.assets) ? payload.assets : [],
+    software_licenses: Array.isArray(payload.software_licenses) ? payload.software_licenses : [],
+    maintenance_requests: Array.isArray(payload.maintenance_requests) ? payload.maintenance_requests : [],
+    audit_events: Array.isArray(payload.audit_events) ? payload.audit_events : [],
+    recovery_drills: Array.isArray(payload.recovery_drills) ? payload.recovery_drills : []
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+}
+
+function validateAndVerifyBackupPayload(data: any) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error('Некорректный файл резервной копии: ожидается JSON-объект');
+  }
+  const collectionKeys = [
+    'departments',
+    'employees',
+    'assets',
+    'software_licenses',
+    'maintenance_requests',
+    'audit_events',
+    'recovery_drills'
+  ] as const;
+
+  const hasKnownStructure = Boolean(data.schema_version || data.organization || collectionKeys.some(k => Array.isArray(data[k])));
+  if (!hasKnownStructure) {
+    throw new Error('Файл не содержит валидной структуры резервной копии ECC');
+  }
+
+  for (const key of collectionKeys) {
+    if (data[key] !== undefined && !Array.isArray(data[key])) {
+      throw new Error(`Поле ${key} должно быть массивом`);
+    }
+    if (Array.isArray(data[key])) {
+      for (let i = 0; i < data[key].length; i++) {
+        const item = data[key][i];
+        if (!item || typeof item !== 'object' || Array.isArray(item) || typeof item.id !== 'number') {
+          throw new Error(`Некорректная запись в ${key}[${i}]`);
+        }
+      }
+    }
+  }
+
+  const computedDigest = computeBackupDigest(data);
+  let checksumStatus: 'verified' | 'not_present' = 'not_present';
+  if (data.integrity !== undefined) {
+    if (
+      !data.integrity ||
+      typeof data.integrity !== 'object' ||
+      data.integrity.algorithm !== 'sha256' ||
+      typeof data.integrity.digest !== 'string'
+    ) {
+      throw new Error('Некорректный блок integrity в файле резервной копии');
+    }
+    const providedBuf = Buffer.from(data.integrity.digest.toLowerCase(), 'utf-8');
+    const expectedBuf = Buffer.from(computedDigest.toLowerCase(), 'utf-8');
+    if (providedBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(providedBuf, expectedBuf)) {
+      throw new Error('Нарушена контрольная сумма резервной копии (SHA-256 mismatch): файл повреждён или изменён');
+    }
+    checksumStatus = 'verified';
+  }
+
+  return {
+    schema_version: String(data.schema_version || '1.0'),
+    exported_at: typeof data.exported_at === 'string' ? data.exported_at : null,
+    checksum_status: checksumStatus,
+    sha256_digest: computedDigest,
+    counts: {
+      departments: Array.isArray(data.departments) ? data.departments.length : 0,
+      employees: Array.isArray(data.employees) ? data.employees.length : 0,
+      assets: Array.isArray(data.assets) ? data.assets.length : 0,
+      software_licenses: Array.isArray(data.software_licenses) ? data.software_licenses.length : 0,
+      maintenance_requests: Array.isArray(data.maintenance_requests) ? data.maintenance_requests.length : 0,
+      audit_events: Array.isArray(data.audit_events) ? data.audit_events.length : 0,
+      recovery_drills: Array.isArray(data.recovery_drills) ? data.recovery_drills.length : 0
+    }
+  };
+}
+
 app.get('/api/v1/system/backup', authenticate, (req, res) => {
   const user = (req as any).user as User;
   if (user.role !== 'admin') {
@@ -1958,7 +2225,7 @@ app.get('/api/v1/system/backup', authenticate, (req, res) => {
 
   const orgId = user.organization_id;
   const org = db.organizations.find(o => o.id === orgId);
-  const backupData = {
+  const basePayload = {
     schema_version: '1.0',
     exported_at: new Date().toISOString(),
     organization: org,
@@ -1967,15 +2234,52 @@ app.get('/api/v1/system/backup', authenticate, (req, res) => {
     assets: db.assets.filter(a => a.organization_id === orgId),
     software_licenses: db.softwareLicenses.filter(s => s.organization_id === orgId),
     maintenance_requests: db.maintenanceRequests.filter(m => m.organization_id === orgId),
-    audit_events: db.auditEvents.filter(a => a.organization_id === orgId)
+    audit_events: db.auditEvents.filter(a => a.organization_id === orgId),
+    recovery_drills: (db.recoveryDrills || []).filter(r => r.organization_id === orgId)
+  };
+  const digest = computeBackupDigest(basePayload);
+  const backupData = {
+    ...basePayload,
+    integrity: {
+      algorithm: 'sha256' as const,
+      digest
+    }
   };
 
-  logAudit(orgId, user.id, 'system.backup', 'system', orgId, { timestamp: backupData.exported_at });
+  logAudit(orgId, user.id, 'system.backup', 'system', orgId, { timestamp: backupData.exported_at, sha256: digest });
 
   const filename = `ecc-backup-${org ? org.name.replace(/\s+/g, '_') : 'org'}-${new Date().toISOString().slice(0, 10)}.json`;
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.setHeader('X-ECC-Backup-SHA256', digest);
   res.send(JSON.stringify(backupData, null, 2));
+});
+
+app.post('/api/v1/system/backup/verify', authenticate, upload.single('file'), (req, res) => {
+  const user = (req as any).user as User;
+  if (user.role !== 'admin') {
+    return res.status(403).json({ detail: 'Только администратор может проверять резервные копии' });
+  }
+
+  let data: any;
+  try {
+    if (req.file && req.file.buffer) {
+      data = JSON.parse(req.file.buffer.toString('utf-8'));
+    } else if (req.body && typeof req.body === 'object' && Object.keys(req.body).length > 0) {
+      data = req.body;
+    } else {
+      return res.status(400).json({ detail: 'Файл резервной копии не передан' });
+    }
+  } catch {
+    return res.status(400).json({ detail: 'Неверный формат JSON резервной копии' });
+  }
+
+  try {
+    const summary = validateAndVerifyBackupPayload(data);
+    return res.json({ valid: true, ...summary });
+  } catch (err) {
+    return res.status(422).json({ detail: err instanceof Error ? err.message : 'Ошибка проверки резервной копии' });
+  }
 });
 
 app.post('/api/v1/system/restore', authenticate, upload.single('file'), (req, res) => {
@@ -1988,7 +2292,7 @@ app.post('/api/v1/system/restore', authenticate, upload.single('file'), (req, re
   try {
     if (req.file && req.file.buffer) {
       data = JSON.parse(req.file.buffer.toString('utf-8'));
-    } else if (req.body && typeof req.body === 'object') {
+    } else if (req.body && typeof req.body === 'object' && Object.keys(req.body).length > 0) {
       data = req.body;
     } else {
       return res.status(400).json({ detail: 'Файл резервной копии не передан' });
@@ -1997,37 +2301,389 @@ app.post('/api/v1/system/restore', authenticate, upload.single('file'), (req, re
     return res.status(400).json({ detail: 'Неверный формат JSON резервной копии' });
   }
 
-  if (!data || typeof data !== 'object' || Array.isArray(data)) {
-    return res.status(422).json({ detail: 'Некорректный файл резервной копии: ожидается JSON-объект' });
-  }
-  if (!data.schema_version && !data.organization && !Array.isArray(data.assets) && !Array.isArray(data.departments)) {
-    return res.status(422).json({ detail: 'Файл не содержит валидной структуры резервной копии ECC' });
+  let verification: ReturnType<typeof validateAndVerifyBackupPayload>;
+  try {
+    verification = validateAndVerifyBackupPayload(data);
+  } catch (err) {
+    return res.status(422).json({ detail: err instanceof Error ? err.message : 'Некорректная резервная копия' });
   }
 
   const orgId = user.organization_id;
   if (Array.isArray(data.departments)) {
     db.departments = db.departments.filter(d => d.organization_id !== orgId).concat(data.departments.map((d: any) => ({ ...d, organization_id: orgId })));
+    db.counters.department = Math.max(db.counters.department, ...db.departments.map(d => d.id), 0);
   }
   if (Array.isArray(data.employees)) {
     db.employees = db.employees.filter(e => e.organization_id !== orgId).concat(data.employees.map((e: any) => ({ ...e, organization_id: orgId })));
+    db.counters.employee = Math.max(db.counters.employee, ...db.employees.map(e => e.id), 0);
   }
   if (Array.isArray(data.assets)) {
     db.assets = db.assets.filter(a => a.organization_id !== orgId).concat(data.assets.map((a: any) => ({ ...a, organization_id: orgId })));
+    db.counters.asset = Math.max(db.counters.asset, ...db.assets.map(a => a.id), 0);
   }
   if (Array.isArray(data.software_licenses)) {
     db.softwareLicenses = db.softwareLicenses.filter(s => s.organization_id !== orgId).concat(data.software_licenses.map((s: any) => ({ ...s, organization_id: orgId })));
+    db.counters.software = Math.max(db.counters.software, ...db.softwareLicenses.map(s => s.id), 0);
   }
   if (Array.isArray(data.maintenance_requests)) {
     db.maintenanceRequests = db.maintenanceRequests.filter(m => m.organization_id !== orgId).concat(data.maintenance_requests.map((m: any) => ({ ...m, organization_id: orgId })));
+    db.counters.maintenance = Math.max(db.counters.maintenance, ...db.maintenanceRequests.map(m => m.id), 0);
   }
   if (Array.isArray(data.audit_events)) {
     db.auditEvents = db.auditEvents.filter(a => a.organization_id !== orgId).concat(data.audit_events.map((a: any) => ({ ...a, organization_id: orgId })));
+    db.counters.audit = Math.max(db.counters.audit, ...db.auditEvents.map(a => a.id), 0);
+  }
+  if (Array.isArray(data.recovery_drills)) {
+    db.recoveryDrills = (db.recoveryDrills || []).filter(r => r.organization_id !== orgId).concat(data.recovery_drills.map((r: any) => ({ ...r, organization_id: orgId })));
+    db.counters.recoveryDrill = Math.max(db.counters.recoveryDrill || 0, ...db.recoveryDrills.map(r => r.id), 0);
   }
 
   saveDb();
-  logAudit(orgId, user.id, 'system.restore', 'system', orgId, { restored_at: new Date().toISOString() });
+  logAudit(orgId, user.id, 'system.restore', 'system', orgId, {
+    restored_at: new Date().toISOString(),
+    checksum_status: verification.checksum_status,
+    sha256: verification.sha256_digest
+  });
 
-  res.json({ status: 'ok', detail: 'Данные успешно восстановлены из резервной копии' });
+  res.json({ status: 'ok', detail: 'Данные успешно восстановлены из резервной копии', verification });
+});
+
+// Local Backup Snapshots & Retention (Phase 2 Backup Orchestration Parity)
+function buildOrgBackupPayload(orgId: number) {
+  const org = db.organizations.find(o => o.id === orgId);
+  const basePayload = {
+    schema_version: '1.0',
+    exported_at: new Date().toISOString(),
+    organization: org,
+    departments: db.departments.filter(d => d.organization_id === orgId),
+    employees: db.employees.filter(e => e.organization_id === orgId),
+    assets: db.assets.filter(a => a.organization_id === orgId),
+    software_licenses: db.softwareLicenses.filter(s => s.organization_id === orgId),
+    maintenance_requests: db.maintenanceRequests.filter(m => m.organization_id === orgId),
+    audit_events: db.auditEvents.filter(a => a.organization_id === orgId),
+    recovery_drills: (db.recoveryDrills || []).filter(r => r.organization_id === orgId)
+  };
+  const digest = computeBackupDigest(basePayload);
+  return {
+    digest,
+    backupData: {
+      ...basePayload,
+      integrity: {
+        algorithm: 'sha256' as const,
+        digest
+      }
+    }
+  };
+}
+
+function isSafeOrgSnapshotFilename(filename: string, orgId: number): boolean {
+  const prefix = `ecc-snapshot-org${orgId}-`;
+  return (
+    filename.startsWith(prefix) &&
+    /^ecc-snapshot-org\d+-[0-9TZ-]+\.json$/.test(filename) &&
+    !filename.includes('..') &&
+    !filename.includes('/') &&
+    !filename.includes('\\')
+  );
+}
+
+function listOrgBackupSnapshots(orgId: number) {
+  if (!fs.existsSync(BACKUPS_DIR)) return [];
+  const files = fs
+    .readdirSync(BACKUPS_DIR)
+    .filter(f => isSafeOrgSnapshotFilename(f, orgId))
+    .sort()
+    .reverse();
+
+  return files.map(filename => {
+    const filePath = path.resolve(BACKUPS_DIR, filename);
+    const sidecarPath = `${filePath}.sha256`;
+    const stat = fs.statSync(filePath);
+    let integrityStatus: 'verified' | 'corrupted' | 'missing_sidecar' = 'missing_sidecar';
+    let sha256Digest = '';
+    let exportedAt: string | null = null;
+    try {
+      const raw = fs.readFileSync(filePath, 'utf-8');
+      const parsed = JSON.parse(raw);
+      exportedAt = typeof parsed.exported_at === 'string' ? parsed.exported_at : null;
+      const verified = validateAndVerifyBackupPayload(parsed);
+      sha256Digest = verified.sha256_digest;
+      if (fs.existsSync(sidecarPath)) {
+        const expectedSidecar = fs.readFileSync(sidecarPath, 'utf-8').trim().split(/\s+/)[0].toLowerCase();
+        if (expectedSidecar === sha256Digest.toLowerCase()) {
+          integrityStatus = 'verified';
+        } else {
+          integrityStatus = 'corrupted';
+        }
+      }
+    } catch {
+      integrityStatus = 'corrupted';
+    }
+    return {
+      filename,
+      created_at: exportedAt || stat.mtime.toISOString(),
+      size_bytes: stat.size,
+      sha256_digest: sha256Digest,
+      integrity_status: integrityStatus
+    };
+  });
+}
+
+app.get('/api/v1/system/backup/snapshots', authenticate, (req, res) => {
+  const user = (req as any).user as User;
+  if (user.role !== 'admin') {
+    return res.status(403).json({ detail: 'Только администратор может просматривать снимки резервных копий' });
+  }
+  res.json(listOrgBackupSnapshots(user.organization_id));
+});
+
+app.post('/api/v1/system/backup/snapshots', authenticate, (req, res) => {
+  const user = (req as any).user as User;
+  if (user.role !== 'admin') {
+    return res.status(403).json({ detail: 'Только администратор может создавать снимки резервных копий' });
+  }
+  if (!fs.existsSync(BACKUPS_DIR)) {
+    fs.mkdirSync(BACKUPS_DIR, { recursive: true });
+  }
+  const { digest, backupData } = buildOrgBackupPayload(user.organization_id);
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const filename = `ecc-snapshot-org${user.organization_id}-${stamp}.json`;
+  const filePath = path.resolve(BACKUPS_DIR, filename);
+  const content = JSON.stringify(backupData, null, 2);
+  fs.writeFileSync(filePath, content, 'utf-8');
+  fs.writeFileSync(`${filePath}.sha256`, `${digest}  ${filename}\n`, 'utf-8');
+
+  // Enforce retention limit per organization
+  const allOrgFiles = fs
+    .readdirSync(BACKUPS_DIR)
+    .filter(f => isSafeOrgSnapshotFilename(f, user.organization_id))
+    .sort()
+    .reverse();
+  for (const stale of allOrgFiles.slice(BACKUP_RETENTION_COUNT)) {
+    const stalePath = path.resolve(BACKUPS_DIR, stale);
+    try { fs.unlinkSync(stalePath); } catch { /* ignore */ }
+    try { fs.unlinkSync(`${stalePath}.sha256`); } catch { /* ignore */ }
+  }
+
+  logAudit(user.organization_id, user.id, 'system.backup.snapshot', 'system', filename, {
+    sha256: digest,
+    retention_limit: BACKUP_RETENTION_COUNT
+  });
+
+  const stat = fs.statSync(filePath);
+  res.status(201).json({
+    filename,
+    created_at: backupData.exported_at,
+    size_bytes: stat.size,
+    sha256_digest: digest,
+    integrity_status: 'verified'
+  });
+});
+
+app.get('/api/v1/system/backup/snapshots/:filename/download', authenticate, (req, res) => {
+  const user = (req as any).user as User;
+  if (user.role !== 'admin') {
+    return res.status(403).json({ detail: 'Только администратор может скачивать снимки' });
+  }
+  const filename = req.params.filename;
+  if (!isSafeOrgSnapshotFilename(filename, user.organization_id)) {
+    return res.status(400).json({ detail: 'Недопустимое имя файла снимка' });
+  }
+  const filePath = path.resolve(BACKUPS_DIR, filename);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ detail: 'Снимок не найден' });
+  }
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.sendFile(filePath);
+});
+
+app.delete('/api/v1/system/backup/snapshots/:filename', authenticate, (req, res) => {
+  const user = (req as any).user as User;
+  if (user.role !== 'admin') {
+    return res.status(403).json({ detail: 'Только администратор может удалять снимки' });
+  }
+  const filename = req.params.filename;
+  if (!isSafeOrgSnapshotFilename(filename, user.organization_id)) {
+    return res.status(400).json({ detail: 'Недопустимое имя файла снимка' });
+  }
+  const filePath = path.resolve(BACKUPS_DIR, filename);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ detail: 'Снимок не найден' });
+  }
+  fs.unlinkSync(filePath);
+  try { fs.unlinkSync(`${filePath}.sha256`); } catch { /* ignore */ }
+  logAudit(user.organization_id, user.id, 'system.backup.snapshot_deleted', 'system', filename);
+  res.status(204).end();
+});
+
+// Measured Recovery Drill Reports (PR #96 parity)
+function parseTimezoneIsoTimestamp(value: unknown, fieldName: string): Date {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new Error(`${fieldName} is required`);
+  }
+  const s = value.trim();
+  // Require timezone offset (Z or ±HH:MM) just like recovery-drill-report.py
+  if (!/(Z|[+-]\d{2}:\d{2})$/i.test(s)) {
+    throw new Error(`${fieldName} must include a timezone offset (e.g. Z or +00:00)`);
+  }
+  const parsed = new Date(s);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error(`Invalid ISO-8601 timestamp for ${fieldName}`);
+  }
+  return parsed;
+}
+
+function parsePositiveTargetSeconds(value: unknown, fieldName: string): number | null {
+  if (value === null || value === undefined || value === '') return null;
+  const num = Number(value);
+  if (!Number.isInteger(num) || num <= 0) {
+    throw new Error(`${fieldName} must be a positive integer number of seconds`);
+  }
+  return num;
+}
+
+app.get('/api/v1/system/recovery-drills', authenticate, (req, res) => {
+  const user = (req as any).user as User;
+  if (user.role !== 'admin') {
+    return res.status(403).json({ detail: 'Только администратор может просматривать отчёты по восстановлению' });
+  }
+  const list = (db.recoveryDrills || []).filter(r => r.organization_id === user.organization_id);
+  res.json(list);
+});
+
+app.post('/api/v1/system/recovery-drills', authenticate, (req, res) => {
+  const user = (req as any).user as User;
+  if (user.role !== 'admin') {
+    return res.status(403).json({ detail: 'Только администратор может создавать отчёты по восстановлению' });
+  }
+
+  const {
+    backup_reference,
+    incident_at,
+    restore_started_at,
+    restore_completed_at,
+    last_committed_at,
+    rto_target_seconds,
+    rpo_target_seconds
+  } = req.body || {};
+
+  if (typeof backup_reference !== 'string' || !backup_reference.trim() || /[\x00-\x1f]/.test(backup_reference)) {
+    return res.status(422).json({ detail: 'backup_reference must be non-empty and contain no control characters' });
+  }
+
+  let incident: Date;
+  let completed: Date;
+  let started: Date | null = null;
+  let committed: Date | null = null;
+  let rtoTarget: number | null = null;
+  let rpoTarget: number | null = null;
+
+  try {
+    incident = parseTimezoneIsoTimestamp(incident_at, 'incident_at');
+    completed = parseTimezoneIsoTimestamp(restore_completed_at, 'restore_completed_at');
+    if (restore_started_at) {
+      started = parseTimezoneIsoTimestamp(restore_started_at, 'restore_started_at');
+    }
+    if (last_committed_at) {
+      committed = parseTimezoneIsoTimestamp(last_committed_at, 'last_committed_at');
+    }
+    rtoTarget = parsePositiveTargetSeconds(rto_target_seconds, 'rto_target_seconds');
+    rpoTarget = parsePositiveTargetSeconds(rpo_target_seconds, 'rpo_target_seconds');
+  } catch (err) {
+    return res.status(422).json({ detail: err instanceof Error ? err.message : 'Invalid timestamp or target' });
+  }
+
+  if (completed.getTime() < incident.getTime()) {
+    return res.status(422).json({ detail: 'restore completion cannot precede incident time' });
+  }
+  if (started && (started.getTime() < incident.getTime() || started.getTime() > completed.getTime())) {
+    return res.status(422).json({ detail: 'restore start must be between incident and restore completion' });
+  }
+  if (committed && committed.getTime() > incident.getTime()) {
+    return res.status(422).json({ detail: 'last committed transaction cannot be after incident time' });
+  }
+  if (rpoTarget !== null && !committed) {
+    return res.status(422).json({ detail: 'rpo_target_seconds requires last_committed_at' });
+  }
+
+  const rto = Math.round(((completed.getTime() - incident.getTime()) / 1000) * 1000) / 1000;
+  const execution = started ? Math.round(((completed.getTime() - started.getTime()) / 1000) * 1000) / 1000 : null;
+  const rpo = committed ? Math.round(((incident.getTime() - committed.getTime()) / 1000) * 1000) / 1000 : null;
+
+  const rtoMet = rtoTarget !== null ? rto <= rtoTarget : null;
+  const rpoMet = rpoTarget !== null && rpo !== null ? rpo <= rpoTarget : null;
+  const assessed = [rtoMet, rpoMet].filter((v): v is boolean => v !== null);
+  let assessment: RecoveryDrillAssessment = 'not_assessed';
+  if (assessed.length > 0) {
+    assessment = assessed.every(Boolean) ? 'within_targets' : 'target_exceeded';
+  }
+
+  if (!Array.isArray(db.recoveryDrills)) db.recoveryDrills = [];
+  db.counters.recoveryDrill = (db.counters.recoveryDrill || 0) + 1;
+
+  const report: RecoveryDrillReport = {
+    id: db.counters.recoveryDrill,
+    organization_id: user.organization_id,
+    created_by_user_id: user.id,
+    schema_version: 1,
+    report_type: 'ecc_recovery_drill',
+    generated_at: new Date().toISOString(),
+    backup_reference: backup_reference.trim(),
+    timestamps: {
+      incident_at: incident.toISOString(),
+      restore_started_at: started ? started.toISOString() : null,
+      restore_completed_at: completed.toISOString(),
+      last_committed_at: committed ? committed.toISOString() : null
+    },
+    measurements_seconds: {
+      observed_rto: rto,
+      restore_execution: execution,
+      observed_rpo: rpo
+    },
+    targets_seconds: {
+      rto: rtoTarget,
+      rpo: rpoTarget
+    },
+    target_met: {
+      rto: rtoMet,
+      rpo: rpoMet
+    },
+    assessment,
+    measurement_notes: {
+      rto: 'Incident declaration to verified restore completion.',
+      rpo: 'Incident time minus last known committed transaction time; requires a trustworthy transaction timestamp.',
+      missing_rpo: committed ? null : 'RPO was not measured. Backup age alone is not proof of data loss.'
+    }
+  };
+
+  db.recoveryDrills.unshift(report);
+  saveDb();
+
+  logAudit(user.organization_id, user.id, 'system.recovery_drill', 'system', report.id, {
+    backup_reference: report.backup_reference,
+    observed_rto: report.measurements_seconds.observed_rto,
+    observed_rpo: report.measurements_seconds.observed_rpo,
+    assessment: report.assessment
+  });
+
+  res.status(201).json(report);
+});
+
+app.get('/api/v1/system/recovery-drills/:id/download', authenticate, (req, res) => {
+  const user = (req as any).user as User;
+  if (user.role !== 'admin') {
+    return res.status(403).json({ detail: 'Только администратор может выгружать отчёты по восстановлению' });
+  }
+  const drillId = parseInt(req.params.id, 10);
+  const report = (db.recoveryDrills || []).find(r => r.id === drillId && r.organization_id === user.organization_id);
+  if (!report) {
+    return res.status(404).json({ detail: 'Отчёт по восстановлению не найден' });
+  }
+  const { id: _id, organization_id: _org, created_by_user_id: _creator, ...exportPayload } = report;
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="ecc-recovery-drill-${report.id}.json"`);
+  res.send(JSON.stringify(exportPayload, null, 2));
 });
 
 // System Telemetry & Security Posture (Phase 2 Monitoring)
@@ -2044,11 +2700,89 @@ app.get('/api/v1/system/telemetry', authenticate, (req, res) => {
     }
   } catch { /* ignore */ }
 
+  const orgAuditEvents = db.auditEvents.filter(e => e.organization_id === user.organization_id);
+  const orgDrills = (db.recoveryDrills || []).filter(r => r.organization_id === user.organization_id);
+  const lastBackup = orgAuditEvents.find(e => e.action === 'system.backup');
+  const lastRestore = orgAuditEvents.find(e => e.action === 'system.restore');
+  const lastDrill = orgDrills[0] || null;
+
+  const durations = structuredLogs.map(l => l.duration_ms).sort((a, b) => a - b);
+  const avgDurationMs = durations.length > 0
+    ? Math.round((durations.reduce((sum, d) => sum + d, 0) / durations.length) * 100) / 100
+    : 0;
+  const p95DurationMs = durations.length > 0
+    ? durations[Math.min(durations.length - 1, Math.floor(durations.length * 0.95))]
+    : 0;
+
+  const alerts: { level: 'warning' | 'critical' | 'info'; code: string; message: string }[] = [];
+  if (telemetryCounters.error5xx > 0) {
+    alerts.push({ level: 'critical', code: 'http_5xx', message: `Зафиксированы серверные ошибки 5xx: ${telemetryCounters.error5xx}` });
+  }
+  if (telemetryCounters.rateLimitBlocks > 0) {
+    alerts.push({ level: 'warning', code: 'auth_rate_limit', message: `Срабатываний защиты от перебора паролей (429): ${telemetryCounters.rateLimitBlocks}` });
+  }
+  if (!lastBackup) {
+    alerts.push({ level: 'warning', code: 'no_backup', message: 'Резервная копия организации ещё не создавалась через API.' });
+  }
+  if (lastDrill && lastDrill.assessment === 'target_exceeded') {
+    alerts.push({ level: 'critical', code: 'dr_target_exceeded', message: 'Последнее учение по восстановлению (DR) превысило целевые RTO/RPO.' });
+  }
+
+  const snapshots = listOrgBackupSnapshots(user.organization_id);
+  const corruptedSnapshots = snapshots.filter(s => s.integrity_status === 'corrupted').length;
+  if (corruptedSnapshots > 0) {
+    alerts.push({ level: 'critical', code: 'corrupted_snapshot', message: `Обнаружены повреждённые локальные снимки резервных копий: ${corruptedSnapshots}` });
+  }
+
+  const readiness_checks = [
+    {
+      id: 'secret_key',
+      label: 'Ключ подписи токенов (ECC_SECRET_KEY)',
+      status: configuredSecret ? 'pass' : 'warn',
+      detail: configuredSecret ? 'Настроен пользовательский ключ (>= 32 байт)' : 'Используется dev-ключ по умолчанию; задайте ECC_SECRET_KEY для production'
+    },
+    {
+      id: 'token_ttl',
+      label: 'Короткое время жизни JWT/Bearer-токенов (5–60 мин)',
+      status: 'pass',
+      detail: `${ACCESS_TOKEN_MINUTES} мин (отзыв через token_version активен)`
+    },
+    {
+      id: 'rate_limit',
+      label: 'Ограничение попыток входа по X-Real-IP',
+      status: 'pass',
+      detail: `${AUTH_RATE_LIMIT_MAX} попыток / ${AUTH_RATE_LIMIT_WINDOW_SECONDS} сек`
+    },
+    {
+      id: 'backup_retention',
+      label: 'Локальные SHA-256 снимки резервных копий',
+      status: snapshots.length > 0 && corruptedSnapshots === 0 ? 'pass' : 'warn',
+      detail: snapshots.length > 0
+        ? `${snapshots.length} снимк. (лимит хранения: ${BACKUP_RETENTION_COUNT}), повреждённых: ${corruptedSnapshots}`
+        : 'Нет локальных снимков (создайте в разделе «Резервные копии»)'
+    },
+    {
+      id: 'recovery_drill',
+      label: 'Измеренные учения по восстановлению (RTO/RPO)',
+      status: lastDrill && lastDrill.assessment === 'within_targets' ? 'pass' : 'warn',
+      detail: lastDrill
+        ? `Последнее учение: ${lastDrill.assessment} (RTO ${lastDrill.measurements_seconds.observed_rto} с)`
+        : 'Учения по восстановлению ещё не зафиксированы'
+    },
+    {
+      id: 'structured_logs',
+      label: 'Структурированное логирование HTTP-запросов (stdout JSON)',
+      status: STRUCTURED_LOGS_STDOUT ? 'pass' : 'warn',
+      detail: STRUCTURED_LOGS_STDOUT ? 'Включено (ECC_STRUCTURED_LOGS=true)' : 'Буфер в памяти активен; для stdout JSON задайте ECC_STRUCTURED_LOGS=true'
+    }
+  ];
+
   const mem = process.memoryUsage();
   res.json({
     started_at: serverStartedAt,
     uptime_seconds: Math.round(process.uptime()),
     node_version: process.version,
+    access_token_minutes: ACCESS_TOKEN_MINUTES,
     memory: {
       rss_mb: Math.round((mem.rss / 1024 / 1024) * 10) / 10,
       heap_used_mb: Math.round((mem.heapUsed / 1024 / 1024) * 10) / 10,
@@ -2057,45 +2791,109 @@ app.get('/api/v1/system/telemetry', authenticate, (req, res) => {
     storage: {
       store_file: 'ecc_store.json',
       size_kb: Math.round((dbSizeBytes / 1024) * 10) / 10,
-      total_audit_events: db.auditEvents.filter(e => e.organization_id === user.organization_id).length
+      total_audit_events: orgAuditEvents.length
+    },
+    backup_readiness: {
+      last_backup_at: lastBackup ? lastBackup.created_at : null,
+      last_restore_at: lastRestore ? lastRestore.created_at : null,
+      last_drill_at: lastDrill ? lastDrill.generated_at : null,
+      last_drill_assessment: lastDrill ? lastDrill.assessment : null,
+      total_drills: orgDrills.length,
+      local_snapshots_count: snapshots.length
     },
     requests: {
       total: telemetryCounters.totalRequests,
       api: telemetryCounters.apiRequests,
       error_4xx: telemetryCounters.error4xx,
       error_5xx: telemetryCounters.error5xx,
-      rate_limit_blocks: telemetryCounters.rateLimitBlocks
+      rate_limit_blocks: telemetryCounters.rateLimitBlocks,
+      avg_duration_ms: avgDurationMs,
+      p95_duration_ms: p95DurationMs
     },
+    alerts,
+    readiness_checks,
     security_posture: [
-      { id: 'headers', label: 'HTTP Security Headers (X-Frame-Options, nosniff, Referrer-Policy)', status: 'active' },
-      { id: 'rate_limit', label: 'Защита входа от перебора паролей (10 попыток / 60 сек)', status: 'active' },
-      { id: 'token_revocation', label: 'Отзыв токенов по token_version при смене пароля/статуса', status: 'active' },
-      { id: 'optimistic_locking', label: 'Оптимистическая блокировка версий для защиты от гонок записи', status: 'active' },
-      { id: 'csv_formula', label: 'Экранирование формул при экспорте CSV (=, +, -, @)', status: 'active' },
+      { id: 'headers', label: 'HTTP Security Headers (CSP, X-Frame-Options, nosniff, Referrer-Policy)', status: 'active' },
+      { id: 'rate_limit', label: `Защита входа от перебора паролей (${AUTH_RATE_LIMIT_MAX} попыток / ${AUTH_RATE_LIMIT_WINDOW_SECONDS} сек, X-Real-IP)`, status: 'active' },
+      { id: 'token_revocation', label: `Короткие токены (${ACCESS_TOKEN_MINUTES} мин) и отзыв по token_version`, status: 'active' },
+      { id: 'optimistic_locking', label: 'Оптимистическая блокировка версий и атомарный bulk-update', status: 'active' },
+      { id: 'backup_sha256', label: 'Проверка контрольной суммы резервной копии SHA-256 до восстановления', status: 'active' },
+      { id: 'csv_formula', label: 'Экранирование формул при экспорте CSV (=, +, -, @, пробел+формула)', status: 'active' },
       { id: 'tenant_isolation', label: 'Изоляция данных на уровне organization_id и RBAC', status: 'active' }
     ],
-    recent_logs: structuredLogs.slice(0, 40)
+    recent_logs: structuredLogs.slice(0, 80)
   });
 });
 
 // Audit Events Log
+function filterAuditEvents(orgId: number, entityType: string, search: string) {
+  let events = db.auditEvents.filter(e => e.organization_id === orgId);
+  if (entityType) {
+    events = events.filter(e => e.entity_type === entityType);
+  }
+  if (search) {
+    const q = search.toLowerCase();
+    events = events.filter(e =>
+      e.action.toLowerCase().includes(q) ||
+      e.entity_type.toLowerCase().includes(q) ||
+      e.entity_id.toLowerCase().includes(q) ||
+      JSON.stringify(e.details).toLowerCase().includes(q)
+    );
+  }
+  return events;
+}
+
+app.get('/api/v1/audit-events/export', authenticate, (req, res) => {
+  const user = (req as any).user as User;
+  if (user.role !== 'admin') {
+    return res.status(403).json({ detail: 'Только администратор может выгружать журнал аудита' });
+  }
+  const entityType = ((req.query.entity_type as string) || '').trim();
+  const search = ((req.query.search as string) || '').trim();
+  const events = filterAuditEvents(user.organization_id, entityType, search).slice(0, 2000);
+
+  const header = ['id', 'created_at', 'actor_user_id', 'action', 'entity_type', 'entity_id', 'details'];
+  const rows = events.map(e => [
+    csvSpreadsheetSafe(e.id),
+    csvSpreadsheetSafe(e.created_at),
+    csvSpreadsheetSafe(e.actor_user_id ?? ''),
+    csvSpreadsheetSafe(e.action),
+    csvSpreadsheetSafe(e.entity_type),
+    csvSpreadsheetSafe(e.entity_id),
+    csvSpreadsheetSafe(JSON.stringify(e.details))
+  ].join(','));
+
+  const csv = '\uFEFF' + [header.join(','), ...rows].join('\n');
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="ecc-audit-${new Date().toISOString().slice(0, 10)}.csv"`);
+  res.send(csv);
+});
+
 app.get('/api/v1/audit-events', authenticate, (req, res) => {
   const user = (req as any).user as User;
   if (user.role !== 'admin') {
     return res.status(403).json({ detail: 'Только администратор может просматривать журнал аудита' });
   }
-  const limit = parseInt((req.query.limit as string) || '100', 10);
+  const parsedLimit = parseInt((req.query.limit as string) || '100', 10);
+  const limit = Number.isNaN(parsedLimit) ? 100 : Math.min(200, Math.max(1, parsedLimit));
   const entityType = ((req.query.entity_type as string) || '').trim();
-  let events = db.auditEvents.filter(e => e.organization_id === user.organization_id);
-  if (entityType) {
-    events = events.filter(e => e.entity_type === entityType);
-  }
+  const search = ((req.query.search as string) || '').trim();
+  const events = filterAuditEvents(user.organization_id, entityType, search);
   res.json(events.slice(0, limit));
+});
+
+// Return clean JSON 404 for unknown API paths instead of SPA HTML fallback
+app.use('/api/*', (_req, res) => {
+  res.status(404).json({ detail: 'Маршрут API не найден' });
 });
 
 // --- VITE DEV OR STATIC SERVING ---
 async function startServer() {
-  if (process.env.NODE_ENV !== 'production') {
+  if (process.env.ECC_DISABLE_VITE === 'true') {
+    app.get('/', (_req, res) => {
+      res.status(200).send('ECC API server running');
+    });
+  } else if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -2116,3 +2914,4 @@ async function startServer() {
 }
 
 startServer();
+
