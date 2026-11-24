@@ -175,6 +175,7 @@ async function assertLegacyDemoAccountsMigrateWithBackup(tsxBin: string) {
 
     const persisted = JSON.parse(fs.readFileSync(dbFile, 'utf-8'));
     assert.equal(persisted.assets[0].asset_tag, 'MIG-007', 'Existing business records must survive migration.');
+    assert.equal(persisted.securityBootstrapVersion, 1, 'Successful migration must be marked to avoid resetting admin credentials on every restart.');
     const backupsDir = path.join(legacyDataDir, 'backups');
     const backups = fs.readdirSync(backupsDir).filter(name => name.startsWith('ecc-pre-admin-bootstrap-'));
     assert.equal(backups.length, 1, 'Migration must create a pre-change database backup.');
