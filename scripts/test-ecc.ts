@@ -57,6 +57,45 @@ async function apiJson(route: string, token: string, init: RequestInit = {}) {
   return { status: res.status, headers: res.headers, json, text };
 }
 
+async function assertMissingBootstrapFailsClosed(tsxBin: string) {
+  const emptyDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-no-bootstrap-'));
+  const proc = spawn(tsxBin, ['server.ts'], {
+    env: {
+      ...process.env,
+      ECC_PORT: '3997',
+      ECC_DATA_DIR: emptyDataDir,
+      ECC_DISABLE_VITE: 'true',
+      ECC_SECRET_KEY: 'ecc-no-bootstrap-test-secret-key-at-least-32-bytes',
+      ECC_LICENSE_SIGNING_KEY: TEST_LICENSE_SIGNING_KEY,
+      ECC_BOOTSTRAP_ADMIN_EMAIL: '',
+      ECC_BOOTSTRAP_ADMIN_NAME: '',
+      ECC_BOOTSTRAP_ADMIN_PASSWORD: ''
+    },
+    stdio: ['ignore', 'ignore', 'pipe']
+  });
+  let stderr = '';
+  proc.stderr.on('data', chunk => { stderr += chunk.toString(); });
+  try {
+    const exitCode = await new Promise<number | null>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        proc.kill('SIGKILL');
+        reject(new Error('Server did not exit after missing bootstrap credentials.'));
+      }, 10000);
+      proc.once('exit', code => {
+        clearTimeout(timer);
+        resolve(code);
+      });
+    });
+    assert.notEqual(exitCode, 0, 'Fresh install must refuse to start without bootstrap credentials.');
+    assert.equal(fs.existsSync(path.join(emptyDataDir, 'ecc_store.json')), false,
+      'Missing bootstrap credentials must not create a database.');
+    assert.match(stderr, /ECC_BOOTSTRAP_ADMIN_EMAIL must be set/i);
+  } finally {
+    if (proc.pid && proc.exitCode === null) proc.kill('SIGKILL');
+    fs.rmSync(emptyDataDir, { recursive: true, force: true });
+  }
+}
+
 async function assertCorruptDatabaseFailsClosed(tsxBin: string) {
   const corruptDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-corrupt-db-'));
   const dbFile = path.join(corruptDataDir, 'ecc_store.json');
@@ -105,8 +144,9 @@ async function runTests() {
   const passwordHash = hashPassword('StrongTestPassword123!');
   assert.equal(verifyPassword('StrongTestPassword123!', passwordHash), true);
   assert.equal(verifyPassword('WrongPassword123!', passwordHash), false);
+  await assertMissingBootstrapFailsClosed(tsxBin);
   await assertCorruptDatabaseFailsClosed(tsxBin);
-  console.log('✓ Password storage rejects plaintext credentials; corrupt database startup fails closed.');
+  console.log('✓ Password storage rejects plaintext credentials; missing bootstrap and corrupt database startup fail closed.');
   const tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-test-'));
   const serverProc = spawn(tsxBin, ['server.ts'], {
     detached: true,
@@ -117,6 +157,9 @@ async function runTests() {
       ECC_DISABLE_VITE: 'true',
       ECC_SECRET_KEY: 'ecc-automated-test-secret-key-at-least-32-bytes-long',
       ECC_LICENSE_SIGNING_KEY: TEST_LICENSE_SIGNING_KEY,
+      ECC_BOOTSTRAP_ADMIN_EMAIL: 'admin.test@example.com',
+      ECC_BOOTSTRAP_ADMIN_NAME: 'ECC Test Administrator',
+      ECC_BOOTSTRAP_ADMIN_PASSWORD: 'TestBootstrapPassword123!',
       ACCESS_TOKEN_MINUTES: '20',
       AUTH_RATE_LIMIT_MAX: '5',
       AUTH_RATE_LIMIT_WINDOW_SECONDS: '60',
@@ -168,11 +211,14 @@ async function runTests() {
     console.log('✓ 2. Malformed JSON 400, clean API 404 & strict CORS allowlist');
 
     // 3. Auth login & 20m TTL + 401 WWW-Authenticate
-    const badLogin = await login('admin@example.com', 'wrong-password', { 'X-Real-IP': '198.51.100.10' });
+    const initialUsers = await apiJson('/api/v1/users', (await login('admin.test@example.com', 'TestBootstrapPassword123!', { 'X-Real-IP': '198.51.100.09' })).json.access_token);
+    assert.equal(initialUsers.status, 200);
+    assert.equal(initialUsers.json.length, 1, 'Fresh install must create only the bootstrap administrator.');
+    const badLogin = await login('admin.test@example.com', 'wrong-password', { 'X-Real-IP': '198.51.100.10' });
     assert.equal(badLogin.status, 401);
     assert.equal(badLogin.headers.get('www-authenticate'), 'Bearer');
 
-    const adminLogin = await login('admin@example.com', 'admin12345678', { 'X-Real-IP': '198.51.100.11' });
+    const adminLogin = await login('admin.test@example.com', 'TestBootstrapPassword123!', { 'X-Real-IP': '198.51.100.11' });
     assert.equal(adminLogin.status, 200);
     assert.equal(adminLogin.json.token_type, 'bearer');
     assert.equal(adminLogin.json.expires_in, 1200);
@@ -181,27 +227,27 @@ async function runTests() {
 
     // 4. Login rate limit by X-Real-IP (ignoring spoofed X-Forwarded-For)
     for (let i = 0; i < 5; i += 1) {
-      const attempt = await login('admin@example.com', 'wrong-pass', {
+      const attempt = await login('admin.test@example.com', 'wrong-pass', {
         'X-Real-IP': '198.51.100.77',
         'X-Forwarded-For': `203.0.113.${i + 1}`
       });
       assert.equal(attempt.status, 401);
     }
-    const rateLimited = await login('admin@example.com', 'wrong-pass', {
+    const rateLimited = await login('admin.test@example.com', 'wrong-pass', {
       'X-Real-IP': '198.51.100.77',
       'X-Forwarded-For': '203.0.113.250'
     });
     assert.equal(rateLimited.status, 429);
     assert.ok(Number(rateLimited.headers.get('retry-after')) >= 1);
 
-    const separateIp = await login('admin@example.com', 'wrong-pass', { 'X-Real-IP': '198.51.100.88' });
+    const separateIp = await login('admin.test@example.com', 'wrong-pass', { 'X-Real-IP': '198.51.100.88' });
     assert.equal(separateIp.status, 401);
     console.log('✓ 4. Login rate limit keyed by X-Real-IP (ignoring spoofed X-Forwarded-For)');
 
     // 5. User creation, duplicate email 409, weak password 422, disable/re-enable token revocation, password change revocation
     const dupUser = await apiJson('/api/v1/users', adminToken, {
       method: 'POST',
-      body: JSON.stringify({ email: 'admin@example.com', full_name: 'Dup', password: 'StrongPassword123', role: 'viewer' })
+      body: JSON.stringify({ email: 'admin.test@example.com', full_name: 'Dup', password: 'StrongPassword123', role: 'viewer' })
     });
     assert.equal(dupUser.status, 409);
 
