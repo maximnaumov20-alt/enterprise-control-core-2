@@ -667,14 +667,14 @@ try {
     const hasAdmin = db.users.some(u => u.role === 'admin' && u.is_active);
     if (legacyDemoUsers.length > 0 || !hasAdmin) {
       const adminConfig = getBootstrapAdminConfig();
+      const legacyAdmin = legacyDemoUsers.find(u => u.role === 'admin') ||
+        db.users.find(u => u.role === 'admin');
       const duplicate = db.users.some(u =>
-        u.is_active && u.role !== 'admin' && String(u.email || '').toLowerCase() === adminConfig.email
+        u.is_active && u.id !== legacyAdmin?.id && String(u.email || '').toLowerCase() === adminConfig.email
       );
       if (duplicate) throw new Error('Bootstrap administrator email is already assigned to another active account.');
 
       const backupPath = backupDatabaseBeforeMigration(raw);
-      const legacyAdmin = legacyDemoUsers.find(u => u.role === 'admin') ||
-        db.users.find(u => u.role === 'admin');
       if (legacyAdmin) {
         legacyAdmin.email = adminConfig.email;
         legacyAdmin.full_name = adminConfig.fullName;
