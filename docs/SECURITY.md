@@ -6,7 +6,7 @@ ECC is an early-development project. Authentication, role checks, organization-s
 
 ## Implemented controls
 
-- Passwords are hashed with Argon2 through pwdlib; plaintext passwords are never stored.
+- The current TypeScript server hashes new passwords with Node.js scrypt and a per-password random salt. Password verification rejects legacy plaintext values; records using a non-scrypt password format require an explicit password reset or migration.
 - API access uses short-lived signed bearer tokens. The signing key is supplied through `ECC_SECRET_KEY`; the API refuses authentication when it is missing. Keys shorter than 32 bytes are rejected.
 - A per-user `token_version` claim is checked on authenticated requests. Changing a password or changing a user's active state increments the stored version and invalidates that user's previously issued access tokens.
 - The API container runs as a non-root user, has a health check and is not published directly to the host in the Compose deployment; browser traffic reaches it through the Nginx gateway. The frontend gateway binds to `127.0.0.1` by default, so it is not directly exposed to external interfaces unless an operator explicitly changes the bind address.
@@ -28,6 +28,17 @@ ECC is an early-development project. Authentication, role checks, organization-s
 - Organization provisioning is currently performed by the bootstrap command. There is no self-service tenant signup.
 - There is no independent penetration test, formal threat model, production backup/restore certification or compliance assessment.
 - Deployment still requires HTTPS at the public edge, secure secret storage, restrictive network rules, monitoring, dependency scanning and operational procedures. The Compose loopback binding is only a safer default, not a complete TLS or firewall configuration.
+
+## JSON database integrity
+
+- If the JSON database file cannot be read or parsed, the server must stop during startup. It must not silently replace an unreadable database with freshly seeded demo data.
+- Keep verified backups before any manual database repair or migration. A failed startup is preferable to silently overwriting records.
+
+## Known deployment blockers on the current default branch
+
+- The current default branch still contains seeded demo accounts and a tracked runtime data file. Do not treat those credentials or records as production-safe. See [issue #3](https://github.com/maximnaumov20-alt/enterprise-control-core-2/issues/3).
+- The current default branch still has a built-in authentication-token signing-key fallback. The proposed fail-closed remediation is under review in [PR #2](https://github.com/maximnaumov20-alt/enterprise-control-core-2/pull/2).
+- These items are not considered remediated until the corresponding changes are reviewed, tested, and merged.
 
 ## Reporting a vulnerability
 
