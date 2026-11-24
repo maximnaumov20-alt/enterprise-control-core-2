@@ -719,15 +719,16 @@ function logAudit(
 
 // --- AUTH & TOKENS ---
 const configuredSecret = process.env.ECC_SECRET_KEY;
-if (configuredSecret) {
-  if (configuredSecret.includes('REPLACE_WITH')) {
-    throw new Error('ECC_SECRET_KEY is still a placeholder; configure a unique random secret.');
-  }
-  if (Buffer.byteLength(configuredSecret, 'utf-8') < 32) {
-    throw new Error('ECC_SECRET_KEY must contain at least 32 bytes.');
-  }
+if (!configuredSecret) {
+  throw new Error('ECC_SECRET_KEY must be configured; refusing to use a built-in signing key.');
 }
-const SECRET_KEY = configuredSecret || 'default-super-secret-key-at-least-32-bytes-long-for-ecc-production';
+if (configuredSecret.includes('REPLACE_WITH')) {
+  throw new Error('ECC_SECRET_KEY is still a placeholder; configure a unique random secret.');
+}
+if (Buffer.byteLength(configuredSecret, 'utf-8') < 32) {
+  throw new Error('ECC_SECRET_KEY must contain at least 32 bytes.');
+}
+const SECRET_KEY = configuredSecret;
 
 const ACCESS_TOKEN_MINUTES = Number(process.env.ACCESS_TOKEN_MINUTES || '20');
 if (!Number.isInteger(ACCESS_TOKEN_MINUTES) || ACCESS_TOKEN_MINUTES < 5 || ACCESS_TOKEN_MINUTES > 60) {
@@ -2790,14 +2791,14 @@ app.get('/api/v1/system/telemetry', authenticate, (req, res) => {
     {
       id: 'secret_key',
       label: 'Ключ подписи токенов (ECC_SECRET_KEY)',
-      status: configuredSecret ? 'pass' : 'warn',
-      detail: configuredSecret ? 'Настроен пользовательский ключ (>= 32 байт)' : 'Используется dev-ключ по умолчанию; задайте ECC_SECRET_KEY для production'
+      status: 'pass',
+      detail: 'Настроен пользовательский ключ (>= 32 байт); запуск без него запрещён'
     },
     {
       id: 'license_signing_key',
       label: 'Ключ верификации офлайн-лицензий (ECC_LICENSE_SIGNING_KEY)',
       status: LICENSE_SIGNING.configured ? 'pass' : 'warn',
-      detail: LICENSE_SIGNING.configured ? 'Настроен выделенный ключ верификации (>= 32 байт)' : 'Используется dev-ключ верификации по умолчанию; задайте ECC_LICENSE_SIGNING_KEY'
+      detail: LICENSE_SIGNING.configured ? 'Настроен выделенный ключ верификации (>= 32 байт)' : 'Активация коммерческих лицензий отключена: задайте ECC_LICENSE_SIGNING_KEY'
     },
     {
       id: 'token_ttl',
@@ -2964,6 +2965,12 @@ app.post('/api/v1/system/license/activate', authenticate, (req, res) => {
   const user = (req as any).user as User;
   if (user.role !== 'admin') {
     return res.status(403).json({ detail: 'Только администратор может активировать лицензию' });
+  }
+  if (!LICENSE_SIGNING.configured) {
+    return res.status(503).json({
+      code: 'license_signing_not_configured',
+      detail: 'Активация коммерческих лицензий отключена: настройте ECC_LICENSE_SIGNING_KEY.'
+    });
   }
   const rawKey = typeof req.body?.license_key === 'string' ? req.body.license_key.trim() : '';
   if (!rawKey) {
