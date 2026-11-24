@@ -719,17 +719,16 @@ function logAudit(
 
 // --- AUTH & TOKENS ---
 const configuredSecret = process.env.ECC_SECRET_KEY;
-if (configuredSecret) {
-  if (configuredSecret.includes('REPLACE_WITH')) {
-    throw new Error('ECC_SECRET_KEY is still a placeholder; configure a unique random secret.');
-  }
-  if (Buffer.byteLength(configuredSecret, 'utf-8') < 32) {
-    throw new Error('ECC_SECRET_KEY must contain at least 32 bytes.');
-  }
-} else if (process.env.NODE_ENV === 'production') {
-  throw new Error('ECC_SECRET_KEY must be configured in production; refusing to use a public development key.');
+if (!configuredSecret) {
+  throw new Error('ECC_SECRET_KEY must be configured; refusing to use a built-in signing key.');
 }
-const SECRET_KEY = configuredSecret || 'ecc-development-only-secret-key-do-not-use-in-production';
+if (configuredSecret.includes('REPLACE_WITH')) {
+  throw new Error('ECC_SECRET_KEY is still a placeholder; configure a unique random secret.');
+}
+if (Buffer.byteLength(configuredSecret, 'utf-8') < 32) {
+  throw new Error('ECC_SECRET_KEY must contain at least 32 bytes.');
+}
+const SECRET_KEY = configuredSecret;
 
 const ACCESS_TOKEN_MINUTES = Number(process.env.ACCESS_TOKEN_MINUTES || '20');
 if (!Number.isInteger(ACCESS_TOKEN_MINUTES) || ACCESS_TOKEN_MINUTES < 5 || ACCESS_TOKEN_MINUTES > 60) {
