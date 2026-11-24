@@ -301,7 +301,7 @@ interface EccDatabase {
 }
 
 // --- PERSISTENCE ---
-const DATA_DIR = path.resolve(process.env.ECC_DATA_DIR || path.resolve(__dirname, 'data'));
+const DATA_DIR = path.resolve(process.env.ECC_DATA_DIR || path.resolve(__dirname, 'var', 'ecc-data'));
 const BACKUPS_DIR = path.resolve(DATA_DIR, 'backups');
 const DB_FILE = path.resolve(DATA_DIR, 'ecc_store.json');
 const BACKUP_RETENTION_COUNT = Math.max(1, Math.min(100, Number(process.env.ECC_BACKUP_RETENTION_COUNT || '10') || 10));
@@ -511,7 +511,7 @@ function createInitialDatabase(admin: BootstrapAdminConfig): EccDatabase {
         organization_id: 1,
         asset_id: 5,
         requested_by_user_id: 1,
-        assigned_to_user_id: 2,
+        assigned_to_user_id: null,
         title: 'Мерцание матрицы при подключении через Type-C',
         description: 'При передаче видеосигнала 4K 60Hz экран кратковременно гаснет. Требуется диагностика блока питания или кабеля.',
         priority: 'high',
