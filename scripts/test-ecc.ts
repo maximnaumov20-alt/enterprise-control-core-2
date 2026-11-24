@@ -3,10 +3,22 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { signOfflineLicenseToken } from '../server/licensing';
+import { resolveLicenseSigningKey, signOfflineLicenseToken } from '../server/licensing';
 
 const TEST_PORT = 3999;
 const TEST_LICENSE_SIGNING_KEY = 'ecc-test-offline-license-signing-key-at-least-32-bytes';
+
+// The application must not silently use a published/default license verification key.
+const previousLicenseSigningKey = process.env.ECC_LICENSE_SIGNING_KEY;
+delete process.env.ECC_LICENSE_SIGNING_KEY;
+const missingLicenseSigningKey = resolveLicenseSigningKey();
+assert.equal(missingLicenseSigningKey.configured, false);
+assert.equal(missingLicenseSigningKey.key, '');
+if (previousLicenseSigningKey === undefined) {
+  delete process.env.ECC_LICENSE_SIGNING_KEY;
+} else {
+  process.env.ECC_LICENSE_SIGNING_KEY = previousLicenseSigningKey;
+}
 const BASE_URL = `http://127.0.0.1:${TEST_PORT}`;
 
 async function sleep(ms: number) {
