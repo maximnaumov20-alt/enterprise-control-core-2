@@ -145,8 +145,9 @@ export function resolveLicenseSigningKey(): { key: string; configured: boolean }
     }
     return { key: configured, configured: true };
   }
+  // Fail closed: a published fallback key would let anyone mint commercial licenses.
   return {
-    key: 'default-ecc-offline-license-verification-key-at-least-32-bytes',
+    key: '',
     configured: false
   };
 }
