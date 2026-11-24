@@ -96,6 +96,96 @@ async function assertMissingBootstrapFailsClosed(tsxBin: string) {
   }
 }
 
+async function assertLegacyDemoAccountsMigrateWithBackup(tsxBin: string) {
+  const legacyDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-legacy-migration-'));
+  const dbFile = path.join(legacyDataDir, 'ecc_store.json');
+  const now = new Date().toISOString();
+  const legacyDatabase = {
+    organizations: [{ id: 1, name: 'Legacy Test Organization', created_at: now }],
+    users: [
+      { id: 1, organization_id: 1, email: 'admin@example.com', full_name: 'Old Admin', password_hash: hashPassword('LegacyAdminPassword123!'), role: 'admin', is_active: true, token_version: 1, version: 1, created_at: now },
+      { id: 2, organization_id: 1, email: 'editor@example.com', full_name: 'Old Editor', password_hash: hashPassword('LegacyEditorPassword123!'), role: 'editor', is_active: true, token_version: 1, version: 1, created_at: now },
+      { id: 3, organization_id: 1, email: 'viewer@example.com', full_name: 'Old Viewer', password_hash: hashPassword('LegacyViewerPassword123!'), role: 'viewer', is_active: true, token_version: 1, version: 1, created_at: now }
+    ],
+    departments: [],
+    employees: [],
+    assets: [{ id: 7, organization_id: 1, name: 'Preserved Asset', asset_tag: 'MIG-007', category: 'Test', manufacturer: null, model: null, serial_number: null, assigned_to: null, status: 'active', created_at: now, updated_at: now, version: 1 }],
+    maintenanceRequests: [],
+    softwareLicenses: [],
+    auditEvents: [],
+    recoveryDrills: [],
+    licenses: [],
+    counters: { user: 3, department: 0, employee: 0, asset: 7, maintenance: 0, software: 0, audit: 0, recoveryDrill: 0 }
+  };
+  fs.writeFileSync(dbFile, JSON.stringify(legacyDatabase, null, 2), 'utf-8');
+
+  const port = 3996;
+  const proc = spawn(tsxBin, ['server.ts'], {
+    env: {
+      ...process.env,
+      ECC_PORT: String(port),
+      ECC_DATA_DIR: legacyDataDir,
+      ECC_DISABLE_VITE: 'true',
+      ECC_SECRET_KEY: 'ecc-legacy-migration-test-secret-key-at-least-32-bytes',
+      ECC_LICENSE_SIGNING_KEY: TEST_LICENSE_SIGNING_KEY,
+      ECC_BOOTSTRAP_ADMIN_EMAIL: 'owner.new@example.com',
+      ECC_BOOTSTRAP_ADMIN_NAME: 'New ECC Owner',
+      ECC_BOOTSTRAP_ADMIN_PASSWORD: 'NewBootstrapPassword123!'
+    },
+    stdio: ['ignore', 'ignore', 'pipe']
+  });
+
+  let stderr = '';
+  proc.stderr.on('data', chunk => { stderr += chunk.toString(); });
+  const baseUrl = `http://127.0.0.1:${port}`;
+  try {
+    let ready = false;
+    for (let attempt = 0; attempt < 75; attempt += 1) {
+      try {
+        const health = await fetch(`${baseUrl}/health`);
+        if (health.ok) { ready = true; break; }
+      } catch { /* server is still starting */ }
+      await sleep(200);
+    }
+    assert.equal(ready, true, `Legacy migration server did not start: ${stderr}`);
+
+    const oldLogin = await fetch(`${baseUrl}/api/v1/auth/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ username: 'admin@example.com', password: 'LegacyAdminPassword123!' })
+    });
+    assert.equal(oldLogin.status, 401, 'Legacy administrator credentials must stop working.');
+
+    const newLogin = await fetch(`${baseUrl}/api/v1/auth/token`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ username: 'owner.new@example.com', password: 'NewBootstrapPassword123!' })
+    });
+    assert.equal(newLogin.status, 200);
+    const newToken = (await newLogin.json() as any).access_token as string;
+
+    const usersResponse = await fetch(`${baseUrl}/api/v1/users`, {
+      headers: { Authorization: `Bearer ${newToken}` }
+    });
+    assert.equal(usersResponse.status, 200);
+    const migratedUsers = await usersResponse.json() as any[];
+    assert.equal(migratedUsers.length, 3, 'Legacy account IDs should be preserved for existing references.');
+    assert.equal(migratedUsers.find(u => u.role === 'admin')?.email, 'owner.new@example.com');
+    assert.equal(migratedUsers.filter(u => u.role !== 'admin').every(u => !u.is_active), true);
+
+    const persisted = JSON.parse(fs.readFileSync(dbFile, 'utf-8'));
+    assert.equal(persisted.assets[0].asset_tag, 'MIG-007', 'Existing business records must survive migration.');
+    const backupsDir = path.join(legacyDataDir, 'backups');
+    const backups = fs.readdirSync(backupsDir).filter(name => name.startsWith('ecc-pre-admin-bootstrap-'));
+    assert.equal(backups.length, 1, 'Migration must create a pre-change database backup.');
+    const backup = JSON.parse(fs.readFileSync(path.join(backupsDir, backups[0]), 'utf-8'));
+    assert.equal(backup.users[0].email, 'admin@example.com');
+  } finally {
+    if (proc.pid && proc.exitCode === null) proc.kill('SIGTERM');
+    fs.rmSync(legacyDataDir, { recursive: true, force: true });
+  }
+}
+
 async function assertCorruptDatabaseFailsClosed(tsxBin: string) {
   const corruptDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-corrupt-db-'));
   const dbFile = path.join(corruptDataDir, 'ecc_store.json');
@@ -146,7 +236,8 @@ async function runTests() {
   assert.equal(verifyPassword('WrongPassword123!', passwordHash), false);
   await assertMissingBootstrapFailsClosed(tsxBin);
   await assertCorruptDatabaseFailsClosed(tsxBin);
-  console.log('✓ Password storage rejects plaintext credentials; missing bootstrap and corrupt database startup fail closed.');
+  await assertLegacyDemoAccountsMigrateWithBackup(tsxBin);
+  console.log('✓ Password storage, required first-run bootstrap, legacy-account migration backup and corrupt-database fail-closed checks.');
   const tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-test-'));
   const serverProc = spawn(tsxBin, ['server.ts'], {
     detached: true,
