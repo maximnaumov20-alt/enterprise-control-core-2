@@ -425,6 +425,90 @@ export interface RecoveryDrillInput {
   rpo_target_seconds?: number | null;
 }
 
+export type ProductEdition = "community" | "professional" | "enterprise";
+export type LicenseStatus = "community" | "active" | "expired";
+
+export interface EditionDefinition {
+  edition: ProductEdition;
+  label: string;
+  description: string;
+  limits: {
+    max_users: number | null;
+    max_assets: number | null;
+    max_software_licenses: number | null;
+  };
+  features: string[];
+}
+
+export interface EditionResponse {
+  edition: ProductEdition;
+  edition_label: string;
+  license_status: LicenseStatus;
+  features: string[];
+  limits: {
+    max_users: number | null;
+    max_assets: number | null;
+    max_software_licenses: number | null;
+  };
+  usage: {
+    users: number;
+    assets: number;
+    software_licenses: number;
+  };
+  license: {
+    license_id: string;
+    edition: "professional" | "enterprise";
+    customer_name: string;
+    organization_name: string;
+    issued_at: string;
+    expires_at: string;
+    activated_at: string;
+    max_users: number | null;
+    max_assets: number | null;
+    max_software_licenses: number | null;
+    notes: string | null;
+    key_fingerprint: string;
+  } | null;
+  catalog: EditionDefinition[];
+}
+
+export interface EnterpriseSlaReport {
+  generated_at: string;
+  organization_name: string;
+  edition: ProductEdition;
+  license_id: string | null;
+  availability_and_assets: {
+    total_assets: number;
+    active_assets: number;
+    in_repair_assets: number;
+    retired_assets: number;
+    operational_availability_pct: number;
+  };
+  maintenance_sla: {
+    total_tickets: number;
+    resolved_tickets: number;
+    open_or_in_progress: number;
+    open_high_or_urgent: number;
+    oldest_open_priority_hours: number | null;
+    mean_time_to_resolve_hours: number | null;
+  };
+  software_compliance: {
+    total_licenses: number;
+    seats_total: number;
+    seats_used: number;
+    utilization_pct: number;
+    expiring_within_60d: number;
+  };
+  resilience_and_dr: {
+    verified_snapshots_count: number;
+    corrupted_snapshots_count: number;
+    latest_snapshot_at: string | null;
+    total_drills: number;
+    drills_within_targets: number;
+    dr_compliance_pct: number | null;
+  };
+}
+
 async function downloadRecoveryDrillJson(id: number): Promise<Blob> {
   const response = await fetch(`${API_BASE}/api/v1/system/recovery-drills/${id}/download`, {
     headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {}
@@ -435,6 +519,14 @@ async function downloadRecoveryDrillJson(id: number): Promise<Blob> {
 
 async function downloadBackupSnapshotBlob(filename: string): Promise<Blob> {
   const response = await fetch(`${API_BASE}/api/v1/system/backup/snapshots/${encodeURIComponent(filename)}/download`, {
+    headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {}
+  });
+  if (!response.ok) throw new Error(`Ошибка API: ${response.status}`);
+  return response.blob();
+}
+
+async function downloadAuthedBlob(path: string): Promise<Blob> {
+  const response = await fetch(`${API_BASE}${path}`, {
     headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {}
   });
   if (!response.ok) throw new Error(`Ошибка API: ${response.status}`);
@@ -456,6 +548,18 @@ export const api = {
     }),
   stats: () => request<SystemStats>("/api/v1/system/stats"),
   telemetry: () => request<SystemTelemetry>("/api/v1/system/telemetry"),
+  edition: () => request<EditionResponse>("/api/v1/system/edition"),
+  license: () => request<EditionResponse>("/api/v1/system/license"),
+  activateLicense: (license_key: string) =>
+    request<EditionResponse>("/api/v1/system/license/activate", {
+      method: "POST",
+      body: JSON.stringify({ license_key })
+    }),
+  deactivateLicense: () =>
+    request<EditionResponse>("/api/v1/system/license/deactivate", { method: "POST" }),
+  enterpriseSlaReport: () => request<EnterpriseSlaReport>("/api/v1/enterprise/sla-report"),
+  downloadEnterpriseSlaCsv: () => downloadAuthedBlob("/api/v1/enterprise/sla-report?format=csv"),
+  downloadSupportBundle: () => downloadAuthedBlob("/api/v1/enterprise/support-bundle"),
   backup: () => downloadBackupJson(),
   verifyBackup: (file: File) => verifyBackupJson(file),
   restore: (file: File) => uploadBackupJson(file),

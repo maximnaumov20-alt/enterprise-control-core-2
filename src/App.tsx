@@ -11,8 +11,10 @@ import {
   BackupVerifyResult,
   CurrentUser,
   Department,
+  EditionResponse,
   Employee,
   EmployeeInput,
+  EnterpriseSlaReport,
   MaintenancePriority,
   MaintenanceRequest,
   MaintenanceRequestInput,
@@ -197,10 +199,14 @@ export default function App() {
   const [password, setPassword] = useState("admin12345678");
   const [loginLoading, setLoginLoading] = useState(false);
 
-  type Section = "overview" | "assets" | "software" | "maintenance" | "employees" | "users" | "audit" | "backups" | "monitoring";
+  type Section = "overview" | "assets" | "software" | "maintenance" | "employees" | "users" | "audit" | "backups" | "monitoring" | "licensing";
   const [section, setSection] = useState<Section>("overview");
 
   const [stats, setStats] = useState<SystemStats | null>(null);
+  const [editionSummary, setEditionSummary] = useState<EditionResponse | null>(null);
+  const [licenseKeyInput, setLicenseKeyInput] = useState("");
+  const [licenseSaving, setLicenseSaving] = useState(false);
+  const [slaReport, setSlaReport] = useState<EnterpriseSlaReport | null>(null);
   const [statsLoading, setStatsLoading] = useState(false);
 
   const [telemetry, setTelemetry] = useState<SystemTelemetry | null>(null);
@@ -268,14 +274,16 @@ export default function App() {
     setStatsLoading(true);
     const effectiveRole = roleOverride ?? currentUser?.role;
     try {
-      const [statsData, recentEvents, health] = await Promise.all([
+      const [statsData, recentEvents, health, editionData] = await Promise.all([
         api.stats(),
         effectiveRole === "admin" ? api.auditEvents(6) : Promise.resolve([] as AuditEvent[]),
-        api.health()
+        api.health(),
+        api.edition()
       ]);
       setStats(statsData);
       setEvents(recentEvents);
       setApiOnline(health.status === "ok");
+      setEditionSummary(editionData);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Не удалось загрузить сводку");
     } finally {
@@ -904,6 +912,89 @@ export default function App() {
     }
   }
 
+  async function openLicensing() {
+    setSection("licensing");
+    setError("");
+    try {
+      const licData = await api.license();
+      setEditionSummary(licData);
+      if (licData.features.includes("enterprise_sla_reporting")) {
+        setSlaReport(await api.enterpriseSlaReport());
+      } else {
+        setSlaReport(null);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось загрузить сведения о редакции и лицензии");
+    }
+  }
+
+  async function activateLicenseSubmit(event: FormEvent) {
+    event.preventDefault();
+    if (!licenseKeyInput.trim()) return;
+    setLicenseSaving(true);
+    setError("");
+    try {
+      const updated = await api.activateLicense(licenseKeyInput.trim());
+      setEditionSummary(updated);
+      setLicenseKeyInput("");
+      if (updated.features.includes("enterprise_sla_reporting")) {
+        setSlaReport(await api.enterpriseSlaReport());
+      }
+      setNotice(`Активирована редакция ${updated.edition_label}.`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось активировать лицензионный ключ");
+    } finally {
+      setLicenseSaving(false);
+    }
+  }
+
+  async function deactivateLicenseAction() {
+    if (!confirm("Деактивировать коммерческую лицензию и вернуться на Community Edition? Рабочие данные сохранятся.")) return;
+    setLicenseSaving(true);
+    setError("");
+    try {
+      const updated = await api.deactivateLicense();
+      setEditionSummary(updated);
+      setSlaReport(null);
+      setNotice("Лицензия деактивирована. Активна редакция Community Edition.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось деактивировать лицензию");
+    } finally {
+      setLicenseSaving(false);
+    }
+  }
+
+  async function downloadSlaCsv() {
+    setError("");
+    try {
+      const blob = await api.downloadEnterpriseSlaCsv();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `ecc-enterprise-sla-${new Date().toISOString().slice(0, 10)}.csv`;
+      a.click();
+      window.URL.revokeObjectURL(url);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось выгрузить SLA-отчёт CSV");
+    }
+  }
+
+  async function downloadSupportBundleFile() {
+    setError("");
+    try {
+      const blob = await api.downloadSupportBundle();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `ecc-support-bundle-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      window.URL.revokeObjectURL(url);
+      setNotice("Обезличенный диагностический пакет поддержки выгружен.");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Не удалось сформировать пакет поддержки");
+    }
+  }
+
   async function openMonitoring() {
     setSection("monitoring");
     setError("");
@@ -1284,12 +1375,15 @@ export default function App() {
             <button type="button" className={`nav-item ${section === "monitoring" ? "active" : ""}`} onClick={() => void openMonitoring()}>
               <span>📡</span> Мониторинг
             </button>
+            <button type="button" className={`nav-item ${section === "licensing" ? "active" : ""}`} onClick={() => void openLicensing()}>
+              <span>🔑</span> Редакция и лицензия
+            </button>
           </>
         )}
 
         <div className="sidebar-bottom">
           <span className={apiOnline ? "dot online" : "dot"} /> API {apiOnline ? "подключён" : "не подключён"}
-          <small>Версия 0.3.0 · Community Edition</small>
+          <small>Версия 0.3.0 · {editionSummary?.edition_label ?? "Community Edition"}</small>
         </div>
       </aside>
 
@@ -3454,6 +3548,246 @@ export default function App() {
                       </table>
                     </div>
                   )}
+                </section>
+              </>
+            )}
+          </section>
+        )}
+
+        {/* --- SECTION: COMMERCIAL EDITION & LICENSING (ROADMAP PHASE 3) --- */}
+        {section === "licensing" && currentUser.role === "admin" && (
+          <section className="admin-section">
+            <div className="page-heading">
+              <div>
+                <div className="eyebrow">КОММЕРЧЕСКОЕ ЛИЦЕНЗИРОВАНИЕ И SLA (PHASE 3)</div>
+                <h1>Редакция и офлайн-активация</h1>
+                <p>Границы Community / Enterprise, контроль квот организации, SLA-отчётность и пакеты поддержки</p>
+              </div>
+              <button type="button" className="subtle" onClick={() => void openLicensing()}>
+                Обновить статус
+              </button>
+            </div>
+
+            {error && <div className="alert">{error}</div>}
+            {notice && <div className="notice">{notice}</div>}
+
+            {editionSummary && (
+              <>
+                <div className="overview-grid">
+                  <div className="kpi-card">
+                    <div className="kpi-label">
+                      <span>АКТИВНАЯ РЕДАКЦИЯ</span>
+                      <span className="mono">{editionSummary.license_status.toUpperCase()}</span>
+                    </div>
+                    <div className="kpi-value" style={{ fontSize: "20px" }}>{editionSummary.edition_label}</div>
+                    <div className="kpi-sub">
+                      {editionSummary.license
+                        ? `Лицензиат: ${editionSummary.license.customer_name} · до ${new Date(editionSummary.license.expires_at).toLocaleDateString()}`
+                        : "Базовая бесплатная редакция (офлайн-ключ не установлен)"}
+                    </div>
+                  </div>
+
+                  <div className="kpi-card">
+                    <div className="kpi-label">
+                      <span>ПОЛЬЗОВАТЕЛИ</span>
+                      <span className="mono">КВОТА</span>
+                    </div>
+                    <div className="kpi-value">
+                      {editionSummary.usage.users} / {editionSummary.limits.max_users ?? "∞"}
+                    </div>
+                    <div className="kpi-sub">Учётных записей в организации</div>
+                  </div>
+
+                  <div className="kpi-card">
+                    <div className="kpi-label">
+                      <span>ОБОРУДОВАНИЕ</span>
+                      <span className="mono">КВОТА</span>
+                    </div>
+                    <div className="kpi-value">
+                      {editionSummary.usage.assets} / {editionSummary.limits.max_assets ?? "∞"}
+                    </div>
+                    <div className="kpi-sub">Инвентарных единиц в реестре</div>
+                  </div>
+
+                  <div className="kpi-card">
+                    <div className="kpi-label">
+                      <span>ЛИЦЕНЗИИ ПО</span>
+                      <span className="mono">КВОТА</span>
+                    </div>
+                    <div className="kpi-value">
+                      {editionSummary.usage.software_licenses} / {editionSummary.limits.max_software_licenses ?? "∞"}
+                    </div>
+                    <div className="kpi-sub">Записей в реестре ПО</div>
+                  </div>
+                </div>
+
+                <div className="section-split">
+                  <section className="panel">
+                    <div className="panel-heading">
+                      <div>
+                        <h2>Офлайн-активация коммерческой лицензии</h2>
+                        <p>Проверка HMAC-SHA256 подписи ключа формата ECC1.&lt;payload&gt;.&lt;sig&gt;</p>
+                      </div>
+                    </div>
+                    <form onSubmit={activateLicenseSubmit}>
+                      <label style={{ display: "block", fontSize: "11px", fontWeight: 600, color: "#64748b", marginBottom: "8px" }}>
+                        Офлайн-ключ активации *
+                        <textarea
+                          rows={3}
+                          value={licenseKeyInput}
+                          onChange={e => setLicenseKeyInput(e.target.value)}
+                          placeholder="ECC1.eyJzY2hlbWFfdmVyc2lvbiI6MSwuLi59...."
+                          style={{ width: "100%", marginTop: "6px", fontFamily: "monospace", fontSize: "12px", padding: "8px" }}
+                        />
+                      </label>
+                      <div className="form-actions" style={{ justifyContent: "flex-start" }}>
+                        <button type="submit" className="primary" disabled={licenseSaving || !licenseKeyInput.trim()}>
+                          {licenseSaving ? "Проверка..." : "Активировать лицензию"}
+                        </button>
+                        {editionSummary.license && (
+                          <button
+                            type="button"
+                            className="danger"
+                            disabled={licenseSaving}
+                            onClick={() => void deactivateLicenseAction()}
+                          >
+                            Сбросить до Community
+                          </button>
+                        )}
+                      </div>
+                    </form>
+                    {editionSummary.license && (
+                      <div style={{ marginTop: "12px", padding: "10px 12px", border: "1px solid #cbd5e1", background: "#f8fafc", fontSize: "12px", lineHeight: 1.6 }}>
+                        <div><strong>ID лицензии:</strong> <span className="mono">{editionSummary.license.license_id}</span></div>
+                        <div><strong>Организация:</strong> {editionSummary.license.organization_name} · <strong>Отпечаток:</strong> <span className="mono">{editionSummary.license.key_fingerprint}</span></div>
+                        <div><strong>Срок действия:</strong> {new Date(editionSummary.license.issued_at).toLocaleDateString()} — {new Date(editionSummary.license.expires_at).toLocaleDateString()}</div>
+                      </div>
+                    )}
+                  </section>
+
+                  <section className="panel">
+                    <div className="panel-heading">
+                      <div>
+                        <h2>Коммерческий пакет поддержки (Support Bundle)</h2>
+                        <p>Выгрузка обезличенной диагностики и сводки подписки для обращений в поддержку</p>
+                      </div>
+                    </div>
+                    <p style={{ fontSize: "12px", color: "#475569", lineHeight: 1.6 }}>
+                      Пакет включает параметры редакции, чек-лист готовности, сводку DR-учений и коды HTTP-ошибок
+                      без паролей, хешей, токенов, ключей подписи и персональных данных сотрудников.
+                    </p>
+                    <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", marginTop: "12px" }}>
+                      <button
+                        type="button"
+                        className="primary"
+                        disabled={!editionSummary.features.includes("support_bundle_export")}
+                        onClick={() => void downloadSupportBundleFile()}
+                      >
+                        ⬇ Скачать Support Bundle (.json)
+                      </button>
+                      <button
+                        type="button"
+                        className="subtle"
+                        disabled={!editionSummary.features.includes("enterprise_sla_reporting")}
+                        onClick={() => void downloadSlaCsv()}
+                      >
+                        ⬇ Экспорт SLA-отчёта (.csv)
+                      </button>
+                    </div>
+                    {!editionSummary.features.includes("support_bundle_export") && (
+                      <p style={{ fontSize: "11px", color: "#d97706", marginTop: "10px" }}>
+                        Для выгрузки SLA-отчётов и пакета поддержки активируйте лицензию Professional или Enterprise.
+                      </p>
+                    )}
+                  </section>
+                </div>
+
+                {slaReport && (
+                  <section className="panel">
+                    <div className="panel-heading">
+                      <div>
+                        <h2>Отчёт SLA и операционного соответствия (Enterprise Reporting)</h2>
+                        <p>Рассчитано по данным организации «{slaReport.organization_name}» на {new Date(slaReport.generated_at).toLocaleString()}</p>
+                      </div>
+                    </div>
+                    <div className="overview-grid">
+                      <div className="kpi-card">
+                        <div className="kpi-label"><span>ГОТОВНОСТЬ ПАРКА</span></div>
+                        <div className="kpi-value">{slaReport.availability_and_assets.operational_availability_pct}%</div>
+                        <div className="kpi-sub">
+                          В работе: {slaReport.availability_and_assets.active_assets} · Ремонт: {slaReport.availability_and_assets.in_repair_assets} · Списано: {slaReport.availability_and_assets.retired_assets}
+                        </div>
+                      </div>
+                      <div className="kpi-card">
+                        <div className="kpi-label"><span>MTTR ПО ЗАЯВКАМ</span></div>
+                        <div className="kpi-value">
+                          {slaReport.maintenance_sla.mean_time_to_resolve_hours !== null
+                            ? `${slaReport.maintenance_sla.mean_time_to_resolve_hours} ч`
+                            : "—"}
+                        </div>
+                        <div className="kpi-sub">
+                          Открытых High/Urgent: {slaReport.maintenance_sla.open_high_or_urgent}
+                          {slaReport.maintenance_sla.oldest_open_priority_hours !== null
+                            ? ` (макс. возраст: ${slaReport.maintenance_sla.oldest_open_priority_hours} ч)`
+                            : ""}
+                        </div>
+                      </div>
+                      <div className="kpi-card">
+                        <div className="kpi-label"><span>УТИЛИЗАЦИЯ ЛИЦЕНЗИЙ ПО</span></div>
+                        <div className="kpi-value">{slaReport.software_compliance.utilization_pct}%</div>
+                        <div className="kpi-sub">
+                          Мест: {slaReport.software_compliance.seats_used} / {slaReport.software_compliance.seats_total} · Истекает &lt;60 дн: {slaReport.software_compliance.expiring_within_60d}
+                        </div>
+                      </div>
+                      <div className="kpi-card">
+                        <div className="kpi-label"><span>СООТВЕТСТВИЕ DR / RTO-RPO</span></div>
+                        <div className="kpi-value">
+                          {slaReport.resilience_and_dr.dr_compliance_pct !== null
+                            ? `${slaReport.resilience_and_dr.dr_compliance_pct}%`
+                            : "—"}
+                        </div>
+                        <div className="kpi-sub">
+                          Снимков SHA-256: {slaReport.resilience_and_dr.verified_snapshots_count} · Учений в норме: {slaReport.resilience_and_dr.drills_within_targets} / {slaReport.resilience_and_dr.total_drills}
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+                )}
+
+                <section className="panel">
+                  <div className="panel-heading">
+                    <div>
+                      <h2>Сравнение редакций (Community vs Professional vs Enterprise)</h2>
+                      <p>Прозрачные границы функциональности и квот</p>
+                    </div>
+                  </div>
+                  <div className="table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>РЕДАКЦИЯ</th>
+                          <th>ПОЛЬЗОВАТЕЛИ</th>
+                          <th>ОБОРУДОВАНИЕ</th>
+                          <th>ЛИЦЕНЗИИ ПО</th>
+                          <th>ФУНКЦИИ</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {editionSummary.catalog.map(item => (
+                          <tr key={item.edition}>
+                            <td>
+                              <strong>{item.label}</strong>
+                              <small>{item.description}</small>
+                            </td>
+                            <td className="mono">{item.limits.max_users ?? "Без лимита"}</td>
+                            <td className="mono">{item.limits.max_assets ?? "Без лимита"}</td>
+                            <td className="mono">{item.limits.max_software_licenses ?? "Без лимита"}</td>
+                            <td style={{ fontSize: "12px" }}>{item.features.join(", ")}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </section>
               </>
             )}

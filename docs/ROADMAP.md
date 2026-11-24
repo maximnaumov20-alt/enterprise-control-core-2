@@ -40,10 +40,10 @@
 - [ ] Finalize Community licence, commercial agreement and contributor terms with qualified legal review
 
 ## Phase 3 - commercial edition
-- [ ] Define and document Community/Enterprise boundaries
-- [ ] Separate private commercial modules
-- [ ] Licence service and offline activation design
-- [ ] Enterprise integrations and reporting
-- [ ] Support and subscription operations
+- [x] Define and document Community/Enterprise boundaries (`docs/EDITION-BOUNDARIES.md`)
+- [x] Separate private commercial modules (`server/licensing.ts`)
+- [x] Licence service and offline activation design (signed `ECC1` tokens, expiry & org-binding enforcement, runtime quotas)
+- [ ] Enterprise integrations and reporting (SLA & compliance report JSON/CSV implemented; external ERP/ITSM/billing connectors pending)
+- [ ] Support and subscription operations (sanitized Support Bundle export implemented; external billing portal & commercial operations pending)
 
 Commercial functionality must not be represented as implemented until it exists, is tested and is documented.

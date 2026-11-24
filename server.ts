@@ -4,6 +4,17 @@ import path from 'path';
 import crypto from 'crypto';
 import multer from 'multer';
 import { fileURLToPath } from 'url';
+import {
+  EDITION_CATALOG,
+  StoredLicenseRecord,
+  buildEnterpriseSlaReport,
+  buildSanitizedSupportBundle,
+  formatEnterpriseSlaCsv,
+  hasFeature,
+  resolveLicenseSigningKey,
+  resolveOrgEntitlements,
+  verifyOfflineLicenseToken
+} from './server/licensing';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -275,6 +286,7 @@ interface EccDatabase {
   softwareLicenses: SoftwareLicense[];
   auditEvents: AuditEvent[];
   recoveryDrills?: RecoveryDrillReport[];
+  licenses?: StoredLicenseRecord[];
   counters: {
     user: number;
     department: number;
@@ -636,6 +648,7 @@ function createInitialDatabase(): EccDatabase {
       }
     ],
     recoveryDrills: [],
+    licenses: [],
     counters: {
       user: 3,
       department: 5,
@@ -655,6 +668,7 @@ try {
     const raw = fs.readFileSync(DB_FILE, 'utf-8');
     db = JSON.parse(raw);
     if (!Array.isArray(db.recoveryDrills)) db.recoveryDrills = [];
+    if (!Array.isArray(db.licenses)) db.licenses = [];
     if (typeof db.counters.recoveryDrill !== 'number') db.counters.recoveryDrill = db.recoveryDrills.length;
   } else {
     if (!fs.existsSync(DATA_DIR)) {
@@ -725,6 +739,17 @@ const AUTH_RATE_LIMIT_MAX = Number(process.env.AUTH_RATE_LIMIT_MAX || '10');
 const AUTH_RATE_LIMIT_WINDOW_SECONDS = Number(process.env.AUTH_RATE_LIMIT_WINDOW_SECONDS || '60');
 if (!Number.isInteger(AUTH_RATE_LIMIT_MAX) || AUTH_RATE_LIMIT_MAX < 1 || !Number.isInteger(AUTH_RATE_LIMIT_WINDOW_SECONDS) || AUTH_RATE_LIMIT_WINDOW_SECONDS < 1) {
   throw new Error('Authentication rate-limit settings must be positive integers.');
+}
+
+const LICENSE_SIGNING = resolveLicenseSigningKey();
+
+function getOrgEntitlements(orgId: number) {
+  const stored = (db.licenses || []).find(l => l.organization_id === orgId);
+  return resolveOrgEntitlements(stored, {
+    users: db.users.filter(u => u.organization_id === orgId).length,
+    assets: db.assets.filter(a => a.organization_id === orgId).length,
+    software_licenses: db.softwareLicenses.filter(s => s.organization_id === orgId).length
+  });
 }
 
 interface TokenPayload {
@@ -942,6 +967,13 @@ app.post('/api/v1/users', authenticate, (req, res) => {
   }
   if (db.users.some(u => u.email.toLowerCase() === cleanEmail)) {
     return res.status(409).json({ detail: 'Пользователь с таким email уже существует' });
+  }
+  const entitlements = getOrgEntitlements(user.organization_id);
+  if (entitlements.limits.max_users !== null && entitlements.usage.users >= entitlements.limits.max_users) {
+    return res.status(403).json({
+      code: 'edition_quota_exceeded',
+      detail: `Достигнут лимит пользователей для ${entitlements.edition_label} (${entitlements.limits.max_users}). Активируйте коммерческую лицензию для расширения квоты.`
+    });
   }
 
   db.counters.user += 1;
@@ -1371,6 +1403,13 @@ app.post('/api/v1/assets', authenticate, (req, res) => {
   if (db.assets.some(a => a.organization_id === user.organization_id && a.asset_tag.toLowerCase() === cleanTag.toLowerCase())) {
     return res.status(409).json({ detail: 'Оборудование с таким инвентарным номером уже существует' });
   }
+  const entitlements = getOrgEntitlements(user.organization_id);
+  if (entitlements.limits.max_assets !== null && entitlements.usage.assets >= entitlements.limits.max_assets) {
+    return res.status(403).json({
+      code: 'edition_quota_exceeded',
+      detail: `Достигнут лимит активов для ${entitlements.edition_label} (${entitlements.limits.max_assets}). Активируйте коммерческую лицензию для расширения квоты.`
+    });
+  }
 
   db.counters.asset += 1;
   const now = new Date().toISOString();
@@ -1497,6 +1536,12 @@ app.post('/api/v1/assets/import', authenticate, upload.single('file'), (req, res
 
     if (db.assets.some(a => a.organization_id === user.organization_id && a.asset_tag.toLowerCase() === asset_tag.toLowerCase())) {
       skipped += 1;
+      continue;
+    }
+
+    const impEntitlements = getOrgEntitlements(user.organization_id);
+    if (impEntitlements.limits.max_assets !== null && impEntitlements.usage.assets >= impEntitlements.limits.max_assets) {
+      errors.push({ row: i + 1, error: `Превышен лимит активов редакции (${impEntitlements.limits.max_assets})` });
       continue;
     }
 
@@ -1900,6 +1945,13 @@ app.post('/api/v1/software-licenses', authenticate, (req, res) => {
   }
   if (purchased_at && expires_at && expires_at < purchased_at) {
     return res.status(422).json({ detail: 'expires_at cannot be earlier than purchased_at' });
+  }
+  const licEntitlements = getOrgEntitlements(user.organization_id);
+  if (licEntitlements.limits.max_software_licenses !== null && licEntitlements.usage.software_licenses >= licEntitlements.limits.max_software_licenses) {
+    return res.status(403).json({
+      code: 'edition_quota_exceeded',
+      detail: `Достигнут лимит лицензий ПО для ${licEntitlements.edition_label} (${licEntitlements.limits.max_software_licenses}).`
+    });
   }
 
   db.counters.software += 1;
@@ -2742,6 +2794,12 @@ app.get('/api/v1/system/telemetry', authenticate, (req, res) => {
       detail: configuredSecret ? 'Настроен пользовательский ключ (>= 32 байт)' : 'Используется dev-ключ по умолчанию; задайте ECC_SECRET_KEY для production'
     },
     {
+      id: 'license_signing_key',
+      label: 'Ключ верификации офлайн-лицензий (ECC_LICENSE_SIGNING_KEY)',
+      status: LICENSE_SIGNING.configured ? 'pass' : 'warn',
+      detail: LICENSE_SIGNING.configured ? 'Настроен выделенный ключ верификации (>= 32 байт)' : 'Используется dev-ключ верификации по умолчанию; задайте ECC_LICENSE_SIGNING_KEY'
+    },
+    {
       id: 'token_ttl',
       label: 'Короткое время жизни JWT/Bearer-токенов (5–60 мин)',
       status: 'pass',
@@ -2880,6 +2938,210 @@ app.get('/api/v1/audit-events', authenticate, (req, res) => {
   const search = ((req.query.search as string) || '').trim();
   const events = filterAuditEvents(user.organization_id, entityType, search);
   res.json(events.slice(0, limit));
+});
+
+// Commercial Edition Boundaries, Offline License Activation & Enterprise Reporting (Phase 3)
+app.get('/api/v1/system/edition', authenticate, (req, res) => {
+  const user = (req as any).user as User;
+  res.json({
+    ...getOrgEntitlements(user.organization_id),
+    catalog: Object.values(EDITION_CATALOG)
+  });
+});
+
+app.get('/api/v1/system/license', authenticate, (req, res) => {
+  const user = (req as any).user as User;
+  if (user.role !== 'admin') {
+    return res.status(403).json({ detail: 'Только администратор может просматривать лицензию продукта' });
+  }
+  res.json({
+    ...getOrgEntitlements(user.organization_id),
+    catalog: Object.values(EDITION_CATALOG)
+  });
+});
+
+app.post('/api/v1/system/license/activate', authenticate, (req, res) => {
+  const user = (req as any).user as User;
+  if (user.role !== 'admin') {
+    return res.status(403).json({ detail: 'Только администратор может активировать лицензию' });
+  }
+  const rawKey = typeof req.body?.license_key === 'string' ? req.body.license_key.trim() : '';
+  if (!rawKey) {
+    return res.status(422).json({ detail: 'Передайте офлайн-ключ лицензии (license_key)' });
+  }
+
+  const org = db.organizations.find(o => o.id === user.organization_id);
+  const orgName = org ? org.name : 'Default Organization';
+
+  let verified;
+  try {
+    verified = verifyOfflineLicenseToken(rawKey, LICENSE_SIGNING.key, orgName);
+  } catch (err) {
+    return res.status(422).json({ detail: err instanceof Error ? err.message : 'Ошибка проверки лицензионного ключа' });
+  }
+
+  if (!Array.isArray(db.licenses)) db.licenses = [];
+  const def = EDITION_CATALOG[verified.payload.edition];
+  const record: StoredLicenseRecord = {
+    organization_id: user.organization_id,
+    license_id: verified.payload.license_id,
+    edition: verified.payload.edition,
+    customer_name: verified.payload.customer_name,
+    organization_name: verified.payload.organization_name,
+    issued_at: verified.payload.issued_at,
+    expires_at: verified.payload.expires_at,
+    activated_at: new Date().toISOString(),
+    activated_by_user_id: user.id,
+    max_users: verified.payload.max_users !== undefined ? verified.payload.max_users : def.limits.max_users,
+    max_assets: verified.payload.max_assets !== undefined ? verified.payload.max_assets : def.limits.max_assets,
+    max_software_licenses:
+      verified.payload.max_software_licenses !== undefined
+        ? verified.payload.max_software_licenses
+        : def.limits.max_software_licenses,
+    notes: verified.payload.notes ?? null,
+    key_fingerprint: verified.key_fingerprint
+  };
+
+  const existingIdx = db.licenses.findIndex(l => l.organization_id === user.organization_id);
+  if (existingIdx >= 0) {
+    db.licenses[existingIdx] = record;
+  } else {
+    db.licenses.push(record);
+  }
+  saveDb();
+
+  logAudit(user.organization_id, user.id, 'system.license.activated', 'system', record.license_id, {
+    edition: record.edition,
+    customer_name: record.customer_name,
+    expires_at: record.expires_at,
+    fingerprint: record.key_fingerprint
+  });
+
+  res.status(200).json({
+    ...getOrgEntitlements(user.organization_id),
+    catalog: Object.values(EDITION_CATALOG)
+  });
+});
+
+app.post('/api/v1/system/license/deactivate', authenticate, (req, res) => {
+  const user = (req as any).user as User;
+  if (user.role !== 'admin') {
+    return res.status(403).json({ detail: 'Только администратор может деактивировать лицензию' });
+  }
+  if (!Array.isArray(db.licenses)) db.licenses = [];
+  const idx = db.licenses.findIndex(l => l.organization_id === user.organization_id);
+  const removed = idx >= 0 ? db.licenses.splice(idx, 1)[0] : null;
+  if (removed) {
+    saveDb();
+    logAudit(user.organization_id, user.id, 'system.license.deactivated', 'system', removed.license_id, {
+      previous_edition: removed.edition
+    });
+  }
+  res.json({
+    ...getOrgEntitlements(user.organization_id),
+    catalog: Object.values(EDITION_CATALOG)
+  });
+});
+
+app.get('/api/v1/enterprise/sla-report', authenticate, (req, res) => {
+  const user = (req as any).user as User;
+  if (user.role !== 'admin') {
+    return res.status(403).json({ detail: 'Только администратор может просматривать SLA-отчётность' });
+  }
+  const entitlements = getOrgEntitlements(user.organization_id);
+  if (!hasFeature(entitlements, 'enterprise_sla_reporting')) {
+    return res.status(403).json({
+      code: 'enterprise_license_required',
+      detail: 'Расширенная SLA-отчётность доступна только в коммерческих редакциях Professional / Enterprise.'
+    });
+  }
+
+  const org = db.organizations.find(o => o.id === user.organization_id);
+  const report = buildEnterpriseSlaReport({
+    organizationName: org ? org.name : 'Default Organization',
+    entitlements,
+    assets: db.assets.filter(a => a.organization_id === user.organization_id),
+    softwareLicenses: db.softwareLicenses.filter(s => s.organization_id === user.organization_id),
+    maintenanceRequests: db.maintenanceRequests.filter(m => m.organization_id === user.organization_id),
+    snapshots: listOrgBackupSnapshots(user.organization_id),
+    drills: (db.recoveryDrills || []).filter(r => r.organization_id === user.organization_id)
+  });
+
+  if ((req.query.format as string) === 'csv') {
+    const csv = formatEnterpriseSlaCsv(report);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="ecc-enterprise-sla-${new Date().toISOString().slice(0, 10)}.csv"`);
+    return res.send(csv);
+  }
+  res.json(report);
+});
+
+app.get('/api/v1/enterprise/support-bundle', authenticate, (req, res) => {
+  const user = (req as any).user as User;
+  if (user.role !== 'admin') {
+    return res.status(403).json({ detail: 'Только администратор может выгружать диагностический пакет поддержки' });
+  }
+  const entitlements = getOrgEntitlements(user.organization_id);
+  if (!hasFeature(entitlements, 'support_bundle_export')) {
+    return res.status(403).json({
+      code: 'enterprise_license_required',
+      detail: 'Выгрузка диагностического пакета поддержки доступна в редакциях Professional / Enterprise.'
+    });
+  }
+
+  const org = db.organizations.find(o => o.id === user.organization_id);
+  const orgDrills = (db.recoveryDrills || []).filter(r => r.organization_id === user.organization_id);
+  const lastDrill = orgDrills[0] || null;
+  const snapshots = listOrgBackupSnapshots(user.organization_id);
+  const corruptedSnapshots = snapshots.filter(s => s.integrity_status === 'corrupted').length;
+
+  const durations = structuredLogs.map(l => l.duration_ms).sort((a, b) => a - b);
+  const avgDurationMs = durations.length > 0
+    ? Math.round((durations.reduce((sum, d) => sum + d, 0) / durations.length) * 100) / 100
+    : 0;
+  const p95DurationMs = durations.length > 0
+    ? durations[Math.min(durations.length - 1, Math.floor(durations.length * 0.95))]
+    : 0;
+
+  const bundle = buildSanitizedSupportBundle({
+    organizationName: org ? org.name : 'Default Organization',
+    entitlements,
+    nodeVersion: process.version,
+    uptimeSeconds: Math.round(process.uptime()),
+    readinessChecks: [
+      { id: 'secret_key', label: 'Ключ подписи токенов', status: configuredSecret ? 'pass' : 'warn', detail: configuredSecret ? 'Configured' : 'Default dev key' },
+      { id: 'license_signing_key', label: 'Ключ верификации лицензий', status: LICENSE_SIGNING.configured ? 'pass' : 'warn', detail: LICENSE_SIGNING.configured ? 'Configured' : 'Default dev key' },
+      { id: 'backup_retention', label: 'Снимки резервных копий', status: snapshots.length > 0 && corruptedSnapshots === 0 ? 'pass' : 'warn', detail: `${snapshots.length} snapshots, ${corruptedSnapshots} corrupted` },
+      { id: 'recovery_drill', label: 'Учения DR', status: lastDrill && lastDrill.assessment === 'within_targets' ? 'pass' : 'warn', detail: lastDrill ? lastDrill.assessment : 'none' }
+    ],
+    requestsSummary: {
+      total: telemetryCounters.totalRequests,
+      api: telemetryCounters.apiRequests,
+      error_4xx: telemetryCounters.error4xx,
+      error_5xx: telemetryCounters.error5xx,
+      rate_limit_blocks: telemetryCounters.rateLimitBlocks,
+      avg_duration_ms: avgDurationMs,
+      p95_duration_ms: p95DurationMs
+    },
+    recentHttpErrors: structuredLogs
+      .filter(l => l.status >= 400 && l.status !== 401)
+      .map(({ id, timestamp, method, path: reqPath, status, duration_ms }) => ({
+        id,
+        timestamp,
+        method,
+        path: reqPath,
+        status,
+        duration_ms
+      }))
+  });
+
+  logAudit(user.organization_id, user.id, 'enterprise.support_bundle.exported', 'system', user.organization_id, {
+    edition: entitlements.edition
+  });
+
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="ecc-support-bundle-${new Date().toISOString().slice(0, 10)}.json"`);
+  res.send(JSON.stringify(bundle, null, 2));
 });
 
 // Return clean JSON 404 for unknown API paths instead of SPA HTML fallback

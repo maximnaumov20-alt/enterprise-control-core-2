@@ -3,8 +3,10 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { signOfflineLicenseToken } from '../server/licensing';
 
 const TEST_PORT = 3999;
+const TEST_LICENSE_SIGNING_KEY = 'ecc-test-offline-license-signing-key-at-least-32-bytes';
 const BASE_URL = `http://127.0.0.1:${TEST_PORT}`;
 
 async function sleep(ms: number) {
@@ -65,6 +67,7 @@ async function runTests() {
       ECC_DATA_DIR: tmpDataDir,
       ECC_DISABLE_VITE: 'true',
       ECC_SECRET_KEY: 'ecc-automated-test-secret-key-at-least-32-bytes-long',
+      ECC_LICENSE_SIGNING_KEY: TEST_LICENSE_SIGNING_KEY,
       ACCESS_TOKEN_MINUTES: '20',
       AUTH_RATE_LIMIT_MAX: '5',
       AUTH_RATE_LIMIT_WINDOW_SECONDS: '60',
@@ -526,13 +529,153 @@ async function runTests() {
     assert.equal(typeof telemetry.json.requests.p95_duration_ms, 'number');
     assert.equal(telemetry.json.backup_readiness.local_snapshots_count, 2);
     assert.equal(telemetry.json.backup_readiness.last_drill_assessment, 'within_targets');
-    assert.equal(telemetry.json.readiness_checks.length, 6);
+    assert.equal(telemetry.json.readiness_checks.length, 7);
     assert.equal(telemetry.json.readiness_checks.find((c: any) => c.id === 'secret_key')?.status, 'pass');
+    assert.equal(telemetry.json.readiness_checks.find((c: any) => c.id === 'license_signing_key')?.status, 'pass');
     assert.equal(telemetry.json.readiness_checks.find((c: any) => c.id === 'backup_retention')?.status, 'pass');
     assert.equal(telemetry.json.readiness_checks.find((c: any) => c.id === 'recovery_drill')?.status, 'pass');
     console.log('✓ 13. System telemetry, latency percentiles & operational readiness checks');
 
-    console.log('\nALL ECC INTEGRATION & SECURITY PARITY TESTS PASSED (13/13 SUITES)!');
+    // 14. Commercial Edition boundaries, offline ECC1 activation, quotas, SLA report & sanitized support bundle
+    const communityEdition = await apiJson('/api/v1/system/edition', viewerToken);
+    assert.equal(communityEdition.status, 200);
+    assert.equal(communityEdition.json.edition, 'community');
+    assert.equal(communityEdition.json.limits.max_assets, 250);
+
+    // Community gates must block Enterprise endpoints (403), and non-admins cannot view /system/license
+    assert.equal((await apiJson('/api/v1/system/license', editorToken)).status, 403);
+    assert.equal((await apiJson('/api/v1/enterprise/sla-report', adminToken)).status, 403);
+    assert.equal((await apiJson('/api/v1/enterprise/support-bundle', adminToken)).status, 403);
+
+    // Invalid / expired / wrong-org offline keys must be rejected (422)
+    assert.equal(
+      (await apiJson('/api/v1/system/license/activate', adminToken, {
+        method: 'POST',
+        body: JSON.stringify({ license_key: 'ECC1.broken.signature' })
+      })).status,
+      422
+    );
+
+    const expiredKey = signOfflineLicenseToken({
+      schema_version: 1,
+      license_id: 'LIC-EXP-01',
+      edition: 'enterprise',
+      customer_name: 'Expired Co',
+      organization_name: 'Default Organization',
+      issued_at: '2024-01-01T00:00:00Z',
+      expires_at: '2025-01-01T00:00:00Z'
+    }, TEST_LICENSE_SIGNING_KEY);
+    assert.equal(
+      (await apiJson('/api/v1/system/license/activate', adminToken, {
+        method: 'POST',
+        body: JSON.stringify({ license_key: expiredKey })
+      })).status,
+      422
+    );
+
+    const wrongOrgKey = signOfflineLicenseToken({
+      schema_version: 1,
+      license_id: 'LIC-ORG-99',
+      edition: 'enterprise',
+      customer_name: 'Other Org',
+      organization_name: 'Another Company LLC',
+      issued_at: new Date(Date.now() - 86400000).toISOString(),
+      expires_at: new Date(Date.now() + 30 * 86400000).toISOString()
+    }, TEST_LICENSE_SIGNING_KEY);
+    assert.equal(
+      (await apiJson('/api/v1/system/license/activate', adminToken, {
+        method: 'POST',
+        body: JSON.stringify({ license_key: wrongOrgKey })
+      })).status,
+      422
+    );
+
+    // Activate tight Professional quota (current assets + 1) to verify quota enforcement
+    const currentAssetUsage = communityEdition.json.usage.assets as number;
+    const tightProKey = signOfflineLicenseToken({
+      schema_version: 1,
+      license_id: 'LIC-PRO-QUOTA',
+      edition: 'professional',
+      customer_name: 'Pilot Pro Customer',
+      organization_name: 'Default Organization',
+      issued_at: new Date(Date.now() - 86400000).toISOString(),
+      expires_at: new Date(Date.now() + 30 * 86400000).toISOString(),
+      max_assets: currentAssetUsage + 1
+    }, TEST_LICENSE_SIGNING_KEY);
+    const proAct = await apiJson('/api/v1/system/license/activate', adminToken, {
+      method: 'POST',
+      body: JSON.stringify({ license_key: tightProKey })
+    });
+    assert.equal(proAct.status, 200);
+    assert.equal(proAct.json.edition, 'professional');
+    assert.equal(proAct.json.limits.max_assets, currentAssetUsage + 1);
+
+    const withinQuotaAsset = await apiJson('/api/v1/assets', editorToken, {
+      method: 'POST',
+      body: JSON.stringify({ name: 'Within Quota Asset', asset_tag: 'TST-QUOTA-1', category: 'Компьютер' })
+    });
+    assert.equal(withinQuotaAsset.status, 201);
+
+    const overQuotaAsset = await apiJson('/api/v1/assets', editorToken, {
+      method: 'POST',
+      body: JSON.stringify({ name: 'Over Quota Asset', asset_tag: 'TST-QUOTA-2', category: 'Компьютер' })
+    });
+    assert.equal(overQuotaAsset.status, 403);
+    assert.equal(overQuotaAsset.json.code, 'edition_quota_exceeded');
+
+    // Upgrade to unlimited Enterprise license and verify SLA report (JSON + CSV) & sanitized Support Bundle
+    const enterpriseKey = signOfflineLicenseToken({
+      schema_version: 1,
+      license_id: 'LIC-ENT-2026',
+      edition: 'enterprise',
+      customer_name: 'Enterprise Corp',
+      organization_name: 'Default Organization',
+      issued_at: new Date(Date.now() - 86400000).toISOString(),
+      expires_at: new Date(Date.now() + 365 * 86400000).toISOString()
+    }, TEST_LICENSE_SIGNING_KEY);
+    const entAct = await apiJson('/api/v1/system/license/activate', adminToken, {
+      method: 'POST',
+      body: JSON.stringify({ license_key: enterpriseKey })
+    });
+    assert.equal(entAct.status, 200);
+    assert.equal(entAct.json.edition, 'enterprise');
+    assert.equal(entAct.json.limits.max_assets, null);
+
+    const slaJson = await apiJson('/api/v1/enterprise/sla-report', adminToken);
+    assert.equal(slaJson.status, 200);
+    assert.equal(slaJson.json.license_id, 'LIC-ENT-2026');
+    assert.equal(typeof slaJson.json.availability_and_assets.operational_availability_pct, 'number');
+    assert.equal(slaJson.json.resilience_and_dr.dr_compliance_pct, 100);
+
+    const slaCsvRes = await fetch(`${BASE_URL}/api/v1/enterprise/sla-report?format=csv`, {
+      headers: { Authorization: `Bearer ${adminToken}` }
+    });
+    assert.equal(slaCsvRes.status, 200);
+    const slaCsvBuf = Buffer.from(await slaCsvRes.arrayBuffer());
+    assert.equal(slaCsvBuf[0], 0xef);
+    assert.ok(slaCsvBuf.subarray(3).toString('utf-8').startsWith('metric,value'));
+
+    const bundleRes = await apiJson('/api/v1/enterprise/support-bundle', adminToken);
+    assert.equal(bundleRes.status, 200);
+    assert.equal(bundleRes.json.bundle_type, 'ecc_sanitized_support_bundle');
+    assert.equal(bundleRes.json.subscription.license_id, 'LIC-ENT-2026');
+    const bundleRaw = JSON.stringify(bundleRes.json);
+    assert.equal(bundleRaw.includes('scrypt:'), false, 'Support bundle must not contain password hashes');
+    assert.equal(bundleRaw.includes(TEST_LICENSE_SIGNING_KEY), false, 'Support bundle must not leak signing keys');
+    assert.equal(bundleRaw.includes(adminToken), false, 'Support bundle must not leak bearer tokens');
+
+    // Non-admin blocked from Enterprise endpoints
+    assert.equal((await apiJson('/api/v1/enterprise/sla-report', editorToken)).status, 403);
+    assert.equal((await apiJson('/api/v1/enterprise/support-bundle', viewerToken)).status, 403);
+
+    // Deactivate license -> cleanly reverts to Community without losing data
+    const deact = await apiJson('/api/v1/system/license/deactivate', adminToken, { method: 'POST' });
+    assert.equal(deact.status, 200);
+    assert.equal(deact.json.edition, 'community');
+    assert.equal((await apiJson('/api/v1/enterprise/sla-report', adminToken)).status, 403);
+    console.log('✓ 14. Commercial edition boundaries, offline ECC1 activation, quotas, SLA report & sanitized support bundle');
+
+    console.log('\nALL ECC INTEGRATION & SECURITY PARITY TESTS PASSED (14/14 SUITES)!');
   } catch (err) {
     console.error('TEST FAILURE:', err);
     if (stderrBuf) {
