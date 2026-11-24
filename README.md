@@ -23,7 +23,7 @@
 Требуется Node.js 22+ и npm 10+.
 
 ```bash
-npm ci
+npm install
 npm run lint
 npm test
 npm run build
