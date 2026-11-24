@@ -15,6 +15,16 @@ import {
   resolveOrgEntitlements,
   verifyOfflineLicenseToken
 } from './server/licensing';
+import { hashPassword, verifyPassword } from './server/password';
+  StoredLicenseRecord,
+  buildEnterpriseSlaReport,
+  buildSanitizedSupportBundle,
+  formatEnterpriseSlaCsv,
+  hasFeature,
+  resolveLicenseSigningKey,
+  resolveOrgEntitlements,
+  verifyOfflineLicenseToken
+} from './server/licensing';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -304,28 +314,6 @@ const DATA_DIR = path.resolve(process.env.ECC_DATA_DIR || path.resolve(__dirname
 const BACKUPS_DIR = path.resolve(DATA_DIR, 'backups');
 const DB_FILE = path.resolve(DATA_DIR, 'ecc_store.json');
 const BACKUP_RETENTION_COUNT = Math.max(1, Math.min(100, Number(process.env.ECC_BACKUP_RETENTION_COUNT || '10') || 10));
-
-function hashPassword(password: string): string {
-  const salt = crypto.randomBytes(16).toString('hex');
-  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
-  return `scrypt:${salt}:${hash}`;
-}
-
-function verifyPassword(password: string, stored: string): boolean {
-  if (!stored) return false;
-  if (!stored.startsWith('scrypt:')) {
-    return password === stored;
-  }
-  const parts = stored.split(':');
-  if (parts.length !== 3) return false;
-  const [, salt, hash] = parts;
-  const testHash = crypto.scryptSync(password, salt, 64).toString('hex');
-  try {
-    return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(testHash, 'hex'));
-  } catch {
-    return false;
-  }
-}
 
 function createInitialDatabase(): EccDatabase {
   const now = new Date().toISOString();
@@ -678,8 +666,8 @@ try {
     fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf-8');
   }
 } catch (err) {
-  console.error('Error loading DB file, fallback to seed:', err);
-  db = createInitialDatabase();
+  console.error(`Failed to load database file at ${DB_FILE}; refusing to replace it with seed data.`, err);
+  throw new Error('Database initialization failed. Restore a valid backup before restarting.');
 }
 
 function saveDb() {
