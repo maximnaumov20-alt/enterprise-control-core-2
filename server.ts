@@ -2791,8 +2791,8 @@ app.get('/api/v1/system/telemetry', authenticate, (req, res) => {
     {
       id: 'secret_key',
       label: 'Ключ подписи токенов (ECC_SECRET_KEY)',
-      status: configuredSecret ? 'pass' : 'warn',
-      detail: configuredSecret ? 'Настроен пользовательский ключ (>= 32 байт)' : 'Используется dev-ключ по умолчанию; задайте ECC_SECRET_KEY для production'
+      status: 'pass',
+      detail: 'Настроен пользовательский ключ (>= 32 байт); запуск без него запрещён'
     },
     {
       id: 'license_signing_key',
