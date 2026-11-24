@@ -278,6 +278,7 @@ interface RecoveryDrillReport {
 }
 
 interface EccDatabase {
+  securityBootstrapVersion?: number;
   organizations: Organization[];
   users: User[];
   departments: Department[];
@@ -301,14 +302,38 @@ interface EccDatabase {
 }
 
 // --- PERSISTENCE ---
-const DATA_DIR = path.resolve(process.env.ECC_DATA_DIR || path.resolve(__dirname, 'data'));
+const DATA_DIR = path.resolve(process.env.ECC_DATA_DIR || path.resolve(__dirname, 'var', 'ecc-data'));
 const BACKUPS_DIR = path.resolve(DATA_DIR, 'backups');
 const DB_FILE = path.resolve(DATA_DIR, 'ecc_store.json');
 const BACKUP_RETENTION_COUNT = Math.max(1, Math.min(100, Number(process.env.ECC_BACKUP_RETENTION_COUNT || '10') || 10));
 
-function createInitialDatabase(): EccDatabase {
+interface BootstrapAdminConfig {
+  email: string;
+  fullName: string;
+  password: string;
+}
+
+function getBootstrapAdminConfig(): BootstrapAdminConfig {
+  const email = (process.env.ECC_BOOTSTRAP_ADMIN_EMAIL || '').trim().toLowerCase();
+  const fullName = (process.env.ECC_BOOTSTRAP_ADMIN_NAME || '').trim();
+  const password = process.env.ECC_BOOTSTRAP_ADMIN_PASSWORD || '';
+
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new Error('ECC_BOOTSTRAP_ADMIN_EMAIL must be set to a valid administrator email before first startup.');
+  }
+  if (!fullName || fullName.length > 120) {
+    throw new Error('ECC_BOOTSTRAP_ADMIN_NAME must be set (maximum 120 characters) before first startup.');
+  }
+  if (password.length < 12 || password.length > 128) {
+    throw new Error('ECC_BOOTSTRAP_ADMIN_PASSWORD must contain 12 to 128 characters before first startup.');
+  }
+  return { email, fullName, password };
+}
+
+function createInitialDatabase(admin: BootstrapAdminConfig): EccDatabase {
   const now = new Date().toISOString();
   return {
+    securityBootstrapVersion: 1,
     organizations: [
       { id: 1, name: 'Default Organization', created_at: now }
     ],
@@ -316,34 +341,10 @@ function createInitialDatabase(): EccDatabase {
       {
         id: 1,
         organization_id: 1,
-        email: 'admin@example.com',
-        full_name: 'ECC Administrator',
-        password_hash: hashPassword('admin12345678'),
+        email: admin.email,
+        full_name: admin.fullName,
+        password_hash: hashPassword(admin.password),
         role: 'admin',
-        is_active: true,
-        token_version: 1,
-        version: 1,
-        created_at: now
-      },
-      {
-        id: 2,
-        organization_id: 1,
-        email: 'editor@example.com',
-        full_name: 'Инженер технической поддержки',
-        password_hash: hashPassword('editor12345678'),
-        role: 'editor',
-        is_active: true,
-        token_version: 1,
-        version: 1,
-        created_at: now
-      },
-      {
-        id: 3,
-        organization_id: 1,
-        email: 'viewer@example.com',
-        full_name: 'Сотрудник аудита (наблюдатель)',
-        password_hash: hashPassword('viewer12345678'),
-        role: 'viewer',
         is_active: true,
         token_version: 1,
         version: 1,
@@ -512,7 +513,7 @@ function createInitialDatabase(): EccDatabase {
         organization_id: 1,
         asset_id: 5,
         requested_by_user_id: 1,
-        assigned_to_user_id: 2,
+        assigned_to_user_id: null,
         title: 'Мерцание матрицы при подключении через Type-C',
         description: 'При передаче видеосигнала 4K 60Hz экран кратковременно гаснет. Требуется диагностика блока питания или кабеля.',
         priority: 'high',
@@ -629,7 +630,7 @@ function createInitialDatabase(): EccDatabase {
     recoveryDrills: [],
     licenses: [],
     counters: {
-      user: 3,
+      user: 1,
       department: 5,
       employee: 5,
       asset: 5,
@@ -641,6 +642,19 @@ function createInitialDatabase(): EccDatabase {
   };
 }
 
+function writeDatabaseAtomically(filePath: string, contents: string) {
+  const tempPath = `${filePath}.${process.pid}.tmp`;
+  fs.writeFileSync(tempPath, contents, { encoding: 'utf-8', mode: 0o600, flag: 'wx' });
+  fs.renameSync(tempPath, filePath);
+}
+
+function backupDatabaseBeforeMigration(raw: string): string {
+  fs.mkdirSync(BACKUPS_DIR, { recursive: true, mode: 0o700 });
+  const backupPath = path.join(BACKUPS_DIR, `ecc-pre-admin-bootstrap-${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
+  fs.writeFileSync(backupPath, raw, { encoding: 'utf-8', mode: 0o600, flag: 'wx' });
+  return backupPath;
+}
+
 let db: EccDatabase;
 try {
   if (fs.existsSync(DB_FILE)) {
@@ -649,16 +663,69 @@ try {
     if (!Array.isArray(db.recoveryDrills)) db.recoveryDrills = [];
     if (!Array.isArray(db.licenses)) db.licenses = [];
     if (typeof db.counters.recoveryDrill !== 'number') db.counters.recoveryDrill = db.recoveryDrills.length;
-  } else {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
+
+    const legacyDemoEmails = new Set(['admin@example.com', 'editor@example.com', 'viewer@example.com']);
+    const legacyDemoUsers = db.users.filter(u => legacyDemoEmails.has(String(u.email || '').toLowerCase()));
+    const hasAdmin = db.users.some(u => u.role === 'admin' && u.is_active);
+    const needsBootstrapMigration = (db.securityBootstrapVersion ?? 0) < 1 || legacyDemoUsers.length > 0 || !hasAdmin;
+    if (needsBootstrapMigration) {
+      const adminConfig = getBootstrapAdminConfig();
+      const legacyAdmin = legacyDemoUsers.find(u => u.role === 'admin') ||
+        db.users.find(u => u.role === 'admin' && u.is_active) ||
+        db.users.find(u => u.role === 'admin');
+      const duplicate = db.users.some(u =>
+        u.id !== legacyAdmin?.id && String(u.email || '').toLowerCase() === adminConfig.email
+      );
+      if (duplicate) throw new Error('Bootstrap administrator email is already assigned to another active account.');
+
+      const backupPath = backupDatabaseBeforeMigration(raw);
+      if (legacyAdmin) {
+        legacyAdmin.email = adminConfig.email;
+        legacyAdmin.full_name = adminConfig.fullName;
+        legacyAdmin.password_hash = hashPassword(adminConfig.password);
+        legacyAdmin.is_active = true;
+        legacyAdmin.token_version += 1;
+        legacyAdmin.version += 1;
+      } else {
+        const organizationId = db.organizations[0]?.id;
+        if (!organizationId) throw new Error('Cannot bootstrap an administrator because the database has no organization.');
+        db.counters.user = Math.max(db.counters.user, ...db.users.map(u => u.id), 0) + 1;
+        db.users.push({
+          id: db.counters.user,
+          organization_id: organizationId,
+          email: adminConfig.email,
+          full_name: adminConfig.fullName,
+          password_hash: hashPassword(adminConfig.password),
+          role: 'admin',
+          is_active: true,
+          token_version: 1,
+          version: 1,
+          created_at: new Date().toISOString()
+        });
+      }
+
+      for (const legacyUser of legacyDemoUsers) {
+        if (legacyUser.id === legacyAdmin?.id) continue;
+        legacyUser.email = `disabled-legacy-${legacyUser.id}@invalid.invalid`;
+        legacyUser.full_name = 'Deactivated legacy demo account';
+        legacyUser.password_hash = hashPassword(crypto.randomBytes(32).toString('hex'));
+        legacyUser.is_active = false;
+        legacyUser.token_version += 1;
+        legacyUser.version += 1;
+      }
+      db.securityBootstrapVersion = 1;
+      writeDatabaseAtomically(DB_FILE, JSON.stringify(db, null, 2));
+      console.warn(`Legacy demo-account migration completed. Pre-migration backup: ${backupPath}`);
     }
-    db = createInitialDatabase();
-    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf-8');
+  } else {
+    const adminConfig = getBootstrapAdminConfig();
+    fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+    db = createInitialDatabase(adminConfig);
+    writeDatabaseAtomically(DB_FILE, JSON.stringify(db, null, 2));
   }
 } catch (err) {
-  console.error(`Failed to load database file at ${DB_FILE}; refusing to replace it with seed data.`, err);
-  throw new Error('Database initialization failed. Restore a valid backup before restarting.');
+  console.error(`Database initialization failed for ${DB_FILE}; no seed fallback will be used.`, err);
+  throw new Error('Database initialization failed. Check bootstrap configuration and restore a valid backup if needed.');
 }
 
 function saveDb() {

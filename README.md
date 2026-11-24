@@ -23,7 +23,7 @@
 Требуется Node.js 22+ и npm 10+.
 
 ```bash
-npm ci
+npm install
 npm run lint
 npm test
 npm run build
@@ -34,7 +34,7 @@ npm start
 
 Ключевые переменные окружения описаны в `.env.example` и `docs/INSTALL-AND-UPGRADE.md`:
 - `ECC_PORT` (по умолчанию `3000`)
-- `ECC_DATA_DIR` (по умолчанию `./data`)
+- `ECC_DATA_DIR` (по умолчанию `./var/ecc-data`)
 - `ECC_SECRET_KEY` (ключ подписи Bearer-токенов, от 32 байт)
 - `ECC_LICENSE_SIGNING_KEY` (ключ верификации офлайн-лицензий `ECC1`, от 32 байт)
 - `ACCESS_TOKEN_MINUTES` (`5..60`, по умолчанию `20`)
@@ -63,3 +63,8 @@ docs/
   PRODUCTION-DEPLOYMENT.md    Чек-лист безопасного развёртывания
   licensing/                  Проектные юридические черновики и аудит зависимостей
 ```
+
+
+## Первичная настройка администратора
+
+Новая установка требует задать `ECC_BOOTSTRAP_ADMIN_EMAIL`, `ECC_BOOTSTRAP_ADMIN_NAME` и `ECC_BOOTSTRAP_ADMIN_PASSWORD` через менеджер секретов или защищённое окружение развёртывания. Длина пароля: 12–128 символов. Встроенных паролей администратора, редактора и наблюдателя нет. Каталог рабочей БД по умолчанию: `var/ecc-data`; в production задайте `ECC_DATA_DIR` как постоянный каталог вне Git-рабочей копии. Перед обновлением установки со старым `data/ecc_store.json` изучите [руководство по установке и миграции](docs/INSTALL-AND-UPGRADE.md).
