@@ -108,7 +108,6 @@ async function runTests() {
   assert.equal(verifyPassword('WrongPassword123!', passwordHash), false);
   await assertCorruptDatabaseFailsClosed(tsxBin);
   console.log('✓ Password storage rejects plaintext credentials; corrupt database startup fails closed.');
-  const tsxBin = path.resolve(process.cwd(), 'node_modules', '.bin', 'tsx');
   const serverProc = spawn(tsxBin, ['server.ts'], {
     detached: true,
     env: {
