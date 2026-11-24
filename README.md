@@ -63,3 +63,8 @@ docs/
   PRODUCTION-DEPLOYMENT.md    Чек-лист безопасного развёртывания
   licensing/                  Проектные юридические черновики и аудит зависимостей
 ```
+
+
+## Secure first-run administrator setup
+
+A new installation requires `ECC_BOOTSTRAP_ADMIN_EMAIL`, `ECC_BOOTSTRAP_ADMIN_NAME`, and `ECC_BOOTSTRAP_ADMIN_PASSWORD` to be supplied through a secret manager or protected deployment environment. The password must be 12–128 characters. There are no built-in administrator, editor, or viewer passwords. The default runtime database directory is `var/ecc-data`; production deployments should set `ECC_DATA_DIR` to a persistent location outside the Git working tree. See [the installation and migration guide](docs/INSTALL-AND-UPGRADE.md) before upgrading an installation that used the former tracked `data/ecc_store.json`.
