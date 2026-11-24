@@ -10,3 +10,4 @@ coverage/
 # Runtime database and backups must never be committed
 /data/ecc_store.json
 /data/backups/
+/var/ecc-data/
