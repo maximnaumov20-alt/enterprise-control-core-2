@@ -278,6 +278,7 @@ interface RecoveryDrillReport {
 }
 
 interface EccDatabase {
+  securityBootstrapVersion?: number;
   organizations: Organization[];
   users: User[];
   departments: Department[];
@@ -332,6 +333,7 @@ function getBootstrapAdminConfig(): BootstrapAdminConfig {
 function createInitialDatabase(admin: BootstrapAdminConfig): EccDatabase {
   const now = new Date().toISOString();
   return {
+    securityBootstrapVersion: 1,
     organizations: [
       { id: 1, name: 'Default Organization', created_at: now }
     ],
@@ -665,9 +667,11 @@ try {
     const legacyDemoEmails = new Set(['admin@example.com', 'editor@example.com', 'viewer@example.com']);
     const legacyDemoUsers = db.users.filter(u => legacyDemoEmails.has(String(u.email || '').toLowerCase()));
     const hasAdmin = db.users.some(u => u.role === 'admin' && u.is_active);
-    if (legacyDemoUsers.length > 0 || !hasAdmin) {
+    const needsBootstrapMigration = db.securityBootstrapVersion !== 1 || legacyDemoUsers.length > 0 || !hasAdmin;
+    if (needsBootstrapMigration) {
       const adminConfig = getBootstrapAdminConfig();
       const legacyAdmin = legacyDemoUsers.find(u => u.role === 'admin') ||
+        db.users.find(u => u.role === 'admin' && u.is_active) ||
         db.users.find(u => u.role === 'admin');
       const duplicate = db.users.some(u =>
         u.is_active && u.id !== legacyAdmin?.id && String(u.email || '').toLowerCase() === adminConfig.email
@@ -701,7 +705,7 @@ try {
       }
 
       for (const legacyUser of legacyDemoUsers) {
-        if (legacyUser.role === 'admin') continue;
+        if (legacyUser.id === legacyAdmin?.id) continue;
         legacyUser.email = `disabled-legacy-${legacyUser.id}@invalid.invalid`;
         legacyUser.full_name = 'Deactivated legacy demo account';
         legacyUser.password_hash = hashPassword(crypto.randomBytes(32).toString('hex'));
@@ -709,6 +713,7 @@ try {
         legacyUser.token_version += 1;
         legacyUser.version += 1;
       }
+      db.securityBootstrapVersion = 1;
       writeDatabaseAtomically(DB_FILE, JSON.stringify(db, null, 2));
       console.warn(`Legacy demo-account migration completed. Pre-migration backup: ${backupPath}`);
     }
