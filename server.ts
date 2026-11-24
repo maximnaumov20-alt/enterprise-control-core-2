@@ -667,14 +667,14 @@ try {
     const legacyDemoEmails = new Set(['admin@example.com', 'editor@example.com', 'viewer@example.com']);
     const legacyDemoUsers = db.users.filter(u => legacyDemoEmails.has(String(u.email || '').toLowerCase()));
     const hasAdmin = db.users.some(u => u.role === 'admin' && u.is_active);
-    const needsBootstrapMigration = db.securityBootstrapVersion !== 1 || legacyDemoUsers.length > 0 || !hasAdmin;
+    const needsBootstrapMigration = (db.securityBootstrapVersion ?? 0) < 1 || legacyDemoUsers.length > 0 || !hasAdmin;
     if (needsBootstrapMigration) {
       const adminConfig = getBootstrapAdminConfig();
       const legacyAdmin = legacyDemoUsers.find(u => u.role === 'admin') ||
         db.users.find(u => u.role === 'admin' && u.is_active) ||
         db.users.find(u => u.role === 'admin');
       const duplicate = db.users.some(u =>
-        u.is_active && u.id !== legacyAdmin?.id && String(u.email || '').toLowerCase() === adminConfig.email
+        u.id !== legacyAdmin?.id && String(u.email || '').toLowerCase() === adminConfig.email
       );
       if (duplicate) throw new Error('Bootstrap administrator email is already assigned to another active account.');
 
