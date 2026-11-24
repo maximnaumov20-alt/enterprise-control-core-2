@@ -37,6 +37,8 @@ npm start
 - `ECC_DATA_DIR` (по умолчанию `./data`)
 - `ECC_SECRET_KEY` (ключ подписи Bearer-токенов, от 32 байт)
 - `ECC_LICENSE_SIGNING_KEY` (ключ верификации офлайн-лицензий `ECC1`, от 32 байт)
+
+> Важно: без `ECC_LICENSE_SIGNING_KEY` активация коммерческих лицензий отключена. Приложение не использует встроенный ключ по умолчанию. В production также обязательно задайте уникальный `ECC_SECRET_KEY`; запуск с отсутствующим ключом отклоняется.
 - `ACCESS_TOKEN_MINUTES` (`5..60`, по умолчанию `20`)
 - `AUTH_RATE_LIMIT_MAX` / `AUTH_RATE_LIMIT_WINDOW_SECONDS`
 - `CORS_ORIGINS` (явный список разрешённых HTTPS origins, `*` запрещён)
