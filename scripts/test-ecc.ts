@@ -98,7 +98,6 @@ async function assertCorruptDatabaseFailsClosed(tsxBin: string) {
 }
 
 async function runTests() {
-  const tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-test-'));
   const tsxBin = path.resolve(process.cwd(), 'node_modules', '.bin', 'tsx');
 
   assert.equal(verifyPassword('legacy-password', 'legacy-password'), false,
@@ -108,6 +107,7 @@ async function runTests() {
   assert.equal(verifyPassword('WrongPassword123!', passwordHash), false);
   await assertCorruptDatabaseFailsClosed(tsxBin);
   console.log('✓ Password storage rejects plaintext credentials; corrupt database startup fails closed.');
+  const tmpDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ecc-test-'));
   const serverProc = spawn(tsxBin, ['server.ts'], {
     detached: true,
     env: {
